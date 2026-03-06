@@ -1,0 +1,20 @@
+[package]
+name = "hap-qt"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "QuickTime container reader for HAP video"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/hap-qt"
+keywords = ["hap", "video", "quicktime", "mov", "mp4"]
+categories = ["multimedia::video", "parser-implementations"]
+
+[dependencies]
+hap-parser = { path = "../hap-parser" }
+byteorder = "1.5"
+thiserror = "1.0"
+memmap2 = "0.9"
+
+[dev-dependencies]
+anyhow = "1.0"
+hap-parser = { path = "../hap-parser" }

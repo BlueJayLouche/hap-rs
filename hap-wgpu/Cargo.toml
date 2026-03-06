@@ -1,0 +1,23 @@
+[package]
+name = "hap-wgpu"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+description = "wgpu integration for HAP video playback"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourusername/hap-wgpu"
+keywords = ["hap", "video", "wgpu", "gpu", "texture"]
+categories = ["multimedia::video", "rendering::graphics-api"]
+
+[dependencies]
+hap-parser = { path = "../hap-parser" }
+hap-qt = { path = "../hap-qt" }
+wgpu = "25.0"
+parking_lot = "0.12"
+thiserror = "1.0"
+
+[dev-dependencies]
+anyhow = "1.0"
+pollster = "0.3"
+env_logger = "0.11"
+winit = "0.30"
