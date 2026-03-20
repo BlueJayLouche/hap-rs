@@ -17,6 +17,10 @@ This workspace contains crates for parsing and playing back HAP video files in R
 ## Quick Start
 
 ```bash
+# Clone the repository
+git clone https://github.com/BlueJayLouche/hap-rs.git
+cd hap-rs
+
 # Build the entire workspace
 cargo build --workspace
 
