@@ -15,6 +15,16 @@ byteorder = "1.5"
 thiserror = "1.0"
 memmap2 = "0.9"
 
+# Snappy compression for HAP encoding
+snap = "1.1"
+
+# CPU DXT compression (fallback when GPU unavailable)
+texpresso = { version = "2.0", optional = true }
+
+[features]
+default = ["cpu-compression"]
+cpu-compression = ["texpresso"]
+
 [dev-dependencies]
 anyhow = "1.0"
 hap-parser = { path = "../hap-parser" }

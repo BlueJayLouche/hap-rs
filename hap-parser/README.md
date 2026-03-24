@@ -13,9 +13,9 @@ HAP is a GPU-accelerated video codec designed for real-time playback of high-res
   - Hap Q (YCoCg DXT5)
   - Hap Q Alpha (YCoCg + Alpha)
   - Hap R (BC6H HDR)
-  - Hap R Alpha (BC6H + Alpha)
+  - Hap R Alpha (BC7)
 - Snappy decompression
-- Decode instruction parsing (for complex frames)
+- Decode instruction parsing (for complex frames with multiple chunks)
 
 ## Usage
 
@@ -35,11 +35,29 @@ println!("Compressed size: {} bytes", frame.texture_data.len());
 HAP frames use a section-based layout:
 
 ```
-[Section Header 4 or 8 bytes]
+[Section Header: 4 or 8 bytes]
 [Section Data]
 ```
 
-The section header indicates the size and type of the section. For simple frames, the section data is the compressed texture. For complex frames, it contains decode instructions.
+### Section Header
+
+- **4-byte header**: `[size: 3 bytes LE][type: 1 byte]` when size < 16MB
+- **8-byte header**: `[0,0,0][type][size: 4 bytes LE]` when size >= 16MB
+
+### Top-Level Section Types
+
+| Type | Format | Compression |
+|------|--------|-------------|
+| 0xAB | RGB DXT1 | None |
+| 0xBB | RGB DXT1 | Snappy |
+| 0xAE | RGBA DXT5 | None |
+| 0xBE | RGBA DXT5 | Snappy |
+| 0xAF | YCoCg DXT5 | None |
+| 0xBF | YCoCg DXT5 | Snappy |
+| 0xA1 | Alpha BC4 | None |
+| 0xB1 | Alpha BC4 | Snappy |
+
+For compressed frames, the section data is Snappy-compressed. After decompression, the result is raw DXT/BCn texture data.
 
 ## License
 

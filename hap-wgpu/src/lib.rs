@@ -1,7 +1,9 @@
-//! wgpu Integration for HAP Video Playback
+//! wgpu Integration for HAP Video Playback and Encoding
 //!
 //! Provides GPU-accelerated HAP video playback using wgpu.
 //! Uploads compressed DXT textures directly to the GPU without CPU decompression.
+//!
+//! Also provides high-level video encoding APIs for creating HAP videos.
 //!
 //! # Required wgpu Features
 //!
@@ -32,15 +34,21 @@
 //! # }
 //! ```
 
-// Re-export TextureFormat for convenience
+// Re-export TextureFormat and HAP format types for convenience
 pub use hap_parser::TextureFormat;
-use hap_qt::QtHapReader;
+pub use hap_qt::{CompressionMode, HapFormat, HapFrameEncoder, QtHapReader, VideoConfig};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use thiserror::Error;
+
+// Encoder modules
+pub mod encoder;
+pub mod gpu_compress;
+pub use encoder::{EncodeConfig, EncodeQuality, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError};
+pub use gpu_compress::{GpuDxtCompressor, GpuCompressError};
 
 /// Errors that can occur during HAP playback
 #[derive(Error, Debug)]

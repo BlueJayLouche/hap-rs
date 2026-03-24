@@ -1,6 +1,7 @@
-//! QuickTime Container Reader for HAP Video
+//! QuickTime Container Reader/Writer for HAP Video
 //!
 //! Parses QuickTime/MP4 containers to extract HAP video frames without ffmpeg.
+//! Also supports writing HAP video files.
 
 use byteorder::{BigEndian, ReadBytesExt};
 use std::fs::File;
@@ -9,6 +10,13 @@ use std::path::Path;
 use thiserror::Error;
 
 pub use hap_parser::{HapFrame, TextureFormat, TopLevelType};
+
+// Encoding modules
+pub mod frame_encoder;
+pub mod writer;
+
+pub use frame_encoder::{HapFormat, HapFrameEncoder, CompressionMode, HapEncodeError};
+pub use writer::{QtHapWriter, VideoConfig, QtWriterError};
 
 /// Errors that can occur during QuickTime parsing
 #[derive(Error, Debug)]
