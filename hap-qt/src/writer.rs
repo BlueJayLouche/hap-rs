@@ -611,8 +611,8 @@ impl QtHapWriter {
         // Write stsz (sample size)
         self.write_stsz(&mut content)?;
 
-        // Write stco (chunk offset)
-        self.write_stco(&mut content)?;
+        // Write chunk offsets (co64 for large files, stco for small)
+        self.write_chunk_offsets(&mut content)?;
 
         // Write stbl atom
         writer.write_u32::<BigEndian>(8 + content.len() as u32)?;
@@ -771,28 +771,39 @@ impl QtHapWriter {
         Ok(())
     }
 
-    /// Write stco atom (chunk offset, 32-bit)
-    fn write_stco(&self, writer: &mut dyn Write) -> io::Result<()> {
+    /// Write chunk offset atom — uses co64 (64-bit) if any offset exceeds 4 GB,
+    /// otherwise uses stco (32-bit) for maximum compatibility.
+    fn write_chunk_offsets(&self, writer: &mut dyn Write) -> io::Result<()> {
+        let needs_64bit = self
+            .samples
+            .iter()
+            .any(|s| s.offset > u32::MAX as u64);
+
         let mut content = Vec::new();
 
-        // Version (1 byte) - 0
+        // Version (1 byte) + Flags (3 bytes)
         content.write_u8(0)?;
-        // Flags (3 bytes)
         content.write_all(&[0, 0, 0])?;
-        // Entry count (4 bytes)
+        // Entry count
         content.write_u32::<BigEndian>(self.samples.len() as u32)?;
 
-        // Chunk offsets (absolute file offsets)
-        for sample in &self.samples {
-            // Offset is absolute position in file
-            content.write_u32::<BigEndian>(sample.offset as u32)?;
+        if needs_64bit {
+            for sample in &self.samples {
+                content.write_u64::<BigEndian>(sample.offset)?;
+            }
+            // co64 atom header
+            writer.write_u32::<BigEndian>(8 + content.len() as u32)?;
+            writer.write_all(b"co64")?;
+        } else {
+            for sample in &self.samples {
+                content.write_u32::<BigEndian>(sample.offset as u32)?;
+            }
+            // stco atom header
+            writer.write_u32::<BigEndian>(8 + content.len() as u32)?;
+            writer.write_all(b"stco")?;
         }
 
-        // Write stco atom
-        writer.write_u32::<BigEndian>(8 + content.len() as u32)?;
-        writer.write_all(b"stco")?;
         writer.write_all(&content)?;
-
         Ok(())
     }
 }

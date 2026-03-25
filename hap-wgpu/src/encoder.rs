@@ -438,7 +438,7 @@ impl HapEncoderBuilder {
 }
 
 /// Pad RGBA data from (w, h) to (pw, ph) with zeros
-fn pad_rgba(rgba: &[u8], w: u32, h: u32, pw: u32, ph: u32) -> Vec<u8> {
+pub fn pad_rgba(rgba: &[u8], w: u32, h: u32, pw: u32, ph: u32) -> Vec<u8> {
     let mut padded = vec![0u8; (pw * ph * 4) as usize];
     for y in 0..h {
         let src_start = (y * w * 4) as usize;

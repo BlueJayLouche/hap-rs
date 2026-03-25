@@ -120,12 +120,53 @@ pub enum CompressionMode {
     Snappy,
 }
 
+/// DXT compression quality preset
+///
+/// Controls the speed/quality tradeoff for CPU-based DXT compression.
+/// For live performance encoding, use `Fast`. For offline/import encoding,
+/// use `Balanced` or `Best`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DxtQuality {
+    /// RangeFit: ~2x faster than Balanced, slightly lower quality.
+    /// Recommended for live recording and real-time encoding.
+    Fast,
+    /// ClusterFit (default): good balance of speed and quality.
+    Balanced,
+    /// IterativeClusterFit: best quality, slowest.
+    /// Recommended for final export / archival.
+    Best,
+}
+
+impl Default for DxtQuality {
+    fn default() -> Self {
+        DxtQuality::Balanced
+    }
+}
+
+#[cfg(feature = "cpu-compression")]
+impl DxtQuality {
+    fn to_texpresso_params(self) -> texpresso::Params {
+        match self {
+            DxtQuality::Fast => texpresso::Params {
+                algorithm: texpresso::Algorithm::RangeFit,
+                ..Default::default()
+            },
+            DxtQuality::Balanced => texpresso::Params::default(),
+            DxtQuality::Best => texpresso::Params {
+                algorithm: texpresso::Algorithm::IterativeClusterFit,
+                ..Default::default()
+            },
+        }
+    }
+}
+
 /// Encodes raw video frames to HAP format
 pub struct HapFrameEncoder {
     format: HapFormat,
     width: u32,
     height: u32,
     compression: CompressionMode,
+    quality: DxtQuality,
     padded_width: u32,
     padded_height: u32,
     blocks_x: u32,
@@ -164,11 +205,21 @@ impl HapFrameEncoder {
             width,
             height,
             compression: CompressionMode::Snappy, // Default to Snappy for better compression
+            quality: DxtQuality::default(),
             padded_width,
             padded_height,
             blocks_x,
             blocks_y,
         })
+    }
+
+    /// Set the DXT compression quality (default: Balanced)
+    ///
+    /// `Fast` uses RangeFit (~2x faster, recommended for live recording).
+    /// `Balanced` uses ClusterFit (default texpresso quality).
+    /// `Best` uses IterativeClusterFit (highest quality, slowest).
+    pub fn set_quality(&mut self, quality: DxtQuality) {
+        self.quality = quality;
     }
 
     /// Set the compression mode (default: Snappy)
@@ -302,6 +353,7 @@ impl HapFrameEncoder {
             width: self.width,
             height: self.height,
             compression,
+            quality: self.quality,
             padded_width: self.padded_width,
             padded_height: self.padded_height,
             blocks_x: self.blocks_x,
@@ -351,7 +403,7 @@ impl HapFrameEncoder {
             rgba_data,
             self.padded_width as usize,
             self.padded_height as usize,
-            texpresso::Params::default(),
+            self.quality.to_texpresso_params(),
             &mut output
         );
 
@@ -377,7 +429,7 @@ impl HapFrameEncoder {
             rgba_data,
             self.padded_width as usize,
             self.padded_height as usize,
-            texpresso::Params::default(),
+            self.quality.to_texpresso_params(),
             &mut output
         );
 
@@ -421,7 +473,7 @@ impl HapFrameEncoder {
             &ycocg_data,
             self.padded_width as usize,
             self.padded_height as usize,
-            texpresso::Params::default(),
+            self.quality.to_texpresso_params(),
             &mut output
         );
 
@@ -454,7 +506,7 @@ impl HapFrameEncoder {
             &alpha_data,
             self.padded_width as usize,
             self.padded_height as usize,
-            texpresso::Params::default(),
+            self.quality.to_texpresso_params(),
             &mut output
         );
 

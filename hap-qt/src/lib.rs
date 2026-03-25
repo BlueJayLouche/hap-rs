@@ -15,7 +15,7 @@ pub use hap_parser::{HapFrame, TextureFormat, TopLevelType};
 pub mod frame_encoder;
 pub mod writer;
 
-pub use frame_encoder::{HapFormat, HapFrameEncoder, CompressionMode, HapEncodeError};
+pub use frame_encoder::{HapFormat, HapFrameEncoder, CompressionMode, HapEncodeError, DxtQuality};
 pub use writer::{QtHapWriter, VideoConfig, QtWriterError};
 
 /// Errors that can occur during QuickTime parsing

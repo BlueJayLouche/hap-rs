@@ -36,7 +36,7 @@
 
 // Re-export TextureFormat and HAP format types for convenience
 pub use hap_parser::TextureFormat;
-pub use hap_qt::{CompressionMode, HapFormat, HapFrameEncoder, QtHapReader, VideoConfig};
+pub use hap_qt::{CompressionMode, DxtQuality, HapFormat, HapFrameEncoder, QtHapReader, VideoConfig};
 use parking_lot::Mutex;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -47,7 +47,7 @@ use thiserror::Error;
 // Encoder modules
 pub mod encoder;
 pub mod gpu_compress;
-pub use encoder::{EncodeConfig, EncodeQuality, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError};
+pub use encoder::{EncodeConfig, EncodeQuality, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError, pad_rgba};
 pub use gpu_compress::{GpuDxtCompressor, GpuCompressError};
 
 /// Errors that can occur during HAP playback
