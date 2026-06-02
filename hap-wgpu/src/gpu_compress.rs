@@ -136,8 +136,8 @@ impl GpuDxtCompressor {
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("dxt_compress_pipeline_layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[Some(&bind_group_layout)],
+            immediate_size: 0,
         });
 
         // Create compute pipelines from embedded WGSL shaders
@@ -320,7 +320,7 @@ impl GpuDxtCompressor {
             let _ = sender.send(result);
         });
 
-        let _ = self.device.poll(wgpu::PollType::Wait);
+        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
 
         receiver
             .recv()
