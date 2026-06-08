@@ -12,7 +12,7 @@
 //!
 //! ```no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! # let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+//! # let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
 //! let adapter = instance.request_adapter(&wgpu::RequestAdapterOptions::default()).await?;
 //!
 //! // Check if BC compression is supported
@@ -28,6 +28,7 @@
 //!         required_limits: wgpu::Limits::default(),
 //!         memory_hints: wgpu::MemoryHints::default(),
 //!         trace: wgpu::Trace::Off,
+//!         experimental_features: wgpu::ExperimentalFeatures::default(),
 //!     },
 //! ).await?;
 //! # Ok(())
@@ -498,7 +499,7 @@ impl HapPlayer {
     ///
     /// ```no_run
     /// # async fn example() -> anyhow::Result<()> {
-    /// # let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    /// # let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     /// // First, check adapter support when creating device
     /// let adapter = instance.request_adapter(&Default::default()).await.unwrap();
     /// 
@@ -513,6 +514,7 @@ impl HapPlayer {
     ///         required_limits: wgpu::Limits::default(),
     ///         memory_hints: wgpu::MemoryHints::default(),
     ///         trace: wgpu::Trace::Off,
+    ///         experimental_features: wgpu::ExperimentalFeatures::default(),
     ///     },
     /// ).await.unwrap();
     ///

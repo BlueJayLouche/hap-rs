@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     );
     
     // Create wgpu instance
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance.create_surface(window.clone())?;
     
     let adapter = pollster::block_on(async {
@@ -61,6 +61,7 @@ fn main() -> anyhow::Result<()> {
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
             },
         ).await.expect("Failed to create device")
     });

@@ -125,7 +125,7 @@ impl HapVideoEncoder {
     /// ```no_run
     /// # use std::sync::Arc;
     /// # async fn example() -> anyhow::Result<()> {
-    /// # let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    /// # let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     /// # let adapter = instance.request_adapter(&Default::default()).await.unwrap();
     /// # let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
     /// use hap_wgpu::HapVideoEncoder;
