@@ -38,6 +38,7 @@
 pub use hap_parser::TextureFormat;
 pub use hap_qt::{CompressionMode, DxtQuality, HapFormat, HapFrameEncoder, QtHapReader, VideoConfig};
 use parking_lot::Mutex;
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::thread;
@@ -129,8 +130,7 @@ impl HapTexture {
         let actual_size = data.len();
         
         // Validate data size
-        let mut data = data;
-        let mut adjusted_data: Option<Vec<u8>> = None;
+        let mut data = Cow::Borrowed(data);
         
         if actual_size != expected_size {
             // Log detailed debugging info
@@ -159,8 +159,7 @@ impl HapTexture {
                      Trimming to {} bytes ({} blocks).",
                     actual_size, bytes_per_block, trimmed_size, trimmed_size / bytes_per_block
                 );
-                adjusted_data = Some(data[..trimmed_size].to_vec());
-                data = adjusted_data.as_ref().unwrap().as_slice();
+                data = Cow::Owned(data[..trimmed_size].to_vec());
             }
             
             let actual_size = data.len();
@@ -169,8 +168,6 @@ impl HapTexture {
             // Try to determine actual dimensions from data size
             // Strategy: find width/height that gives the right block count
             // Prefer dimensions close to the reported dimensions
-            let reported_blocks_x = blocks_x as usize;
-            let reported_blocks_y = blocks_y as usize;
             
             let mut best_dimensions = None;
             let mut best_error = f32::MAX;
@@ -241,7 +238,7 @@ impl HapTexture {
                         origin: wgpu::Origin3d::ZERO,
                         aspect: wgpu::TextureAspect::All,
                     },
-                    data,
+                    &data,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row),
@@ -347,7 +344,7 @@ impl HapTexture {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            data,
+            &data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(bytes_per_row),

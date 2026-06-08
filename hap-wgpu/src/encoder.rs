@@ -48,26 +48,6 @@ pub enum EncodeQuality {
     Best,
 }
 
-impl EncodeQuality {
-    /// Get texpresso quality parameters
-    /// Get texpresso quality parameters
-    #[allow(dead_code)]
-    #[cfg(feature = "cpu-compression")]
-    fn texpresso_params(&self) -> texpresso::Params {
-        match self {
-            EncodeQuality::Fast => texpresso::Params {
-                algorithm: texpresso::Algorithm::RangeFit,
-                ..Default::default()
-            },
-            EncodeQuality::Balanced => texpresso::Params::default(),
-            EncodeQuality::Best => texpresso::Params {
-                algorithm: texpresso::Algorithm::IterativeClusterFit,
-                ..Default::default()
-            },
-        }
-    }
-}
-
 /// Configuration for video encoding
 #[derive(Clone, Debug)]
 pub struct EncodeConfig {
