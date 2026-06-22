@@ -1,63 +1,57 @@
 # hap-parser
 
-A Rust crate for parsing HAP video frames.
+Parse [HAP](https://hap.video) video frames in pure Rust — no FFmpeg.
 
-HAP is a GPU-accelerated video codec designed for real-time playback of high-resolution video. It stores frames as compressed textures (DXT/BCn formats) that can be uploaded directly to the GPU without CPU decompression.
+HAP is a GPU-accelerated codec: each frame is a block-compressed (BCn) texture
+that uploads straight to the GPU with no CPU pixel decode. This crate turns one
+raw HAP frame (a packet from a QuickTime/MP4 container) into ready-to-upload
+texture data.
 
-## Features
+## Supported formats
 
-- Parse HAP frame headers and sections
-- Support for all HAP variants:
-  - Hap (RGB DXT1)
-  - Hap Alpha (RGBA DXT5)
-  - Hap Q (YCoCg DXT5)
-  - Hap Q Alpha (YCoCg + Alpha)
-  - Hap R (BC6H HDR)
-  - Hap R Alpha (BC7)
-- Snappy decompression
-- Decode instruction parsing (for complex frames with multiple chunks)
+| Variant       | Texture format    | Notes                                     |
+|---------------|-------------------|-------------------------------------------|
+| Hap           | RGB DXT1 (BC1)    |                                           |
+| Hap Alpha     | RGBA DXT5 (BC3)   |                                           |
+| Hap Q         | scaled YCoCg DXT5 | needs YCoCg→RGB conversion before display |
+| Hap Q Alpha   | YCoCg + BC4 alpha | dual-plane (`HapFrame::alpha`)            |
+| Hap R         | RGBA BC7          |                                           |
+
+Each variant may be stored uncompressed, Snappy-compressed, or chunked
+(complex) — all three are handled transparently.
 
 ## Usage
 
 ```rust
-use hap_parser::parse_frame;
+let frame = hap_parser::parse_frame(frame_bytes)?;
 
-// Parse a HAP frame from raw bytes
-let frame_data: &[u8] = // ... read from file
-let frame = parse_frame(frame_data)?;
-
-println!("Format: {:?}", frame.texture_format);
-println!("Compressed size: {} bytes", frame.texture_data.len());
+println!("{:?}, {} bytes", frame.format, frame.data.len());
+if frame.format.needs_ycocg_convert() {
+    // Hap Q: convert YCoCg→RGB in a shader after GPU decode.
+}
+if let Some(alpha) = &frame.alpha {
+    // Hap Q Alpha: separate BC4 alpha plane.
+}
 ```
 
-## HAP Frame Structure
+To size GPU textures before decoding (e.g. when probing the first frame of an
+ffmpeg stream, which reports every HAP variant under one codec id), read just
+the format:
 
-HAP frames use a section-based layout:
-
+```rust
+let format = hap_parser::detect_format(frame_bytes)?;
 ```
-[Section Header: 4 or 8 bytes]
-[Section Data]
-```
 
-### Section Header
+## Frame layout
 
-- **4-byte header**: `[size: 3 bytes LE][type: 1 byte]` when size < 16MB
-- **8-byte header**: `[0,0,0][type][size: 4 bytes LE]` when size >= 16MB
+Each section has a 4-byte header `[len: u24 LE][type: u8]`, or an 8-byte header
+`[0,0,0][type][len: u32 LE]` when the 3-byte length is zero. A top-level
+section's type byte encodes the texture format in its low nibble and the
+compressor in its high nibble (`0xA` none, `0xB` Snappy, `0xC` complex). Section
+type `0x0D` is a multi-image container (Hap Q Alpha).
 
-### Top-Level Section Types
-
-| Type | Format | Compression |
-|------|--------|-------------|
-| 0xAB | RGB DXT1 | None |
-| 0xBB | RGB DXT1 | Snappy |
-| 0xAE | RGBA DXT5 | None |
-| 0xBE | RGBA DXT5 | Snappy |
-| 0xAF | YCoCg DXT5 | None |
-| 0xBF | YCoCg DXT5 | Snappy |
-| 0xA1 | Alpha BC4 | None |
-| 0xB1 | Alpha BC4 | Snappy |
-
-For compressed frames, the section data is Snappy-compressed. After decompression, the result is raw DXT/BCn texture data.
+The parser bounds-checks every section against the buffer, so malformed input
+returns a `HapError` rather than panicking.
 
 ## License
 

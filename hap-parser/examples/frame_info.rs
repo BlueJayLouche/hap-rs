@@ -29,37 +29,28 @@ fn main() -> anyhow::Result<()> {
     match hap_parser::parse_frame(&data) {
         Ok(frame) => {
             println!("\n=== HAP Frame Info ===");
-            println!("Top-level type: {:?}", frame.top_level_type);
-            println!("Texture format: {:?}", frame.texture_format);
-            println!("Uses Snappy: {}", frame.uses_snappy);
-            println!("Texture data size: {} bytes", frame.texture_data.len());
-            
-            if !frame.chunks.is_empty() {
-                println!("Chunks: {}", frame.chunks.len());
-                for (i, chunk) in frame.chunks.iter().enumerate() {
-                    println!("  Chunk {}: {:?}, size={}", i, chunk.compressor, chunk.size);
-                }
+            println!("Texture format: {:?}", frame.format);
+            println!("Needs YCoCg convert: {}", frame.format.needs_ycocg_convert());
+            println!("Texture data size: {} bytes", frame.data.len());
+            if let Some(alpha) = &frame.alpha {
+                println!("Alpha plane: {:?}, {} bytes", alpha.format, alpha.data.len());
             }
-            
+
             // Calculate expected size for common resolutions
-            let expected_720p = hap_parser::expected_texture_size(frame.texture_format, 1280, 720);
-            let expected_1080p = hap_parser::expected_texture_size(frame.texture_format, 1920, 1080);
-            
+            let expected_720p = frame.format.frame_size(1280, 720);
+            let expected_1080p = frame.format.frame_size(1920, 1080);
+
             println!("\nExpected sizes:");
             println!("  1280x720: {} bytes", expected_720p);
             println!("  1920x1080: {} bytes", expected_1080p);
-            
-            if frame.texture_data.len() == expected_720p {
+
+            if frame.data.len() == expected_720p {
                 println!("  -> Matches 720p");
-            } else if frame.texture_data.len() == expected_1080p {
+            } else if frame.data.len() == expected_1080p {
                 println!("  -> Matches 1080p");
             } else {
-                // Try to guess resolution
-                let block_size = hap_parser::bytes_per_block(frame.texture_format);
-                let blocks = frame.texture_data.len() / block_size;
-                println!("  -> {} blocks ({}x{} approx)", blocks, 
-                    (blocks as f32).sqrt() as u32 * 4,
-                    (blocks as f32).sqrt() as u32 * 4);
+                let blocks = frame.data.len() / frame.format.bytes_per_block();
+                println!("  -> {} blocks", blocks);
             }
         }
         Err(e) => {

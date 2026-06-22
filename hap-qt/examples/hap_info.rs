@@ -30,26 +30,20 @@ fn main() -> anyhow::Result<()> {
     let mut reader = reader; // Re-bind as mutable
     match reader.read_frame(0) {
         Ok(frame) => {
-            println!("Format: {:?}", frame.texture_format);
-            println!("Uses Snappy: {}", frame.uses_snappy);
-            println!("Texture data size: {} bytes", frame.texture_data.len());
-            
-            // Calculate expected size
-            let expected = hap_parser::expected_texture_size(
-                frame.texture_format,
-                reader.resolution().0,
-                reader.resolution().1
-            );
-            println!("Expected size for {}x{}: {} bytes", 
-                reader.resolution().0,
-                reader.resolution().1,
-                expected
-            );
-            
-            if frame.texture_data.len() == expected {
+            println!("Format: {:?}", frame.format);
+            println!("Texture data size: {} bytes", frame.data.len());
+            if let Some(alpha) = &frame.alpha {
+                println!("Alpha plane: {:?}, {} bytes", alpha.format, alpha.data.len());
+            }
+
+            let (w, h) = reader.resolution();
+            let expected = frame.format.frame_size(w, h);
+            println!("Expected size for {w}x{h}: {expected} bytes");
+
+            if frame.data.len() == expected {
                 println!("✓ Size matches expected");
             } else {
-                println!("⚠ Size mismatch! Got {} bytes", frame.texture_data.len());
+                println!("⚠ Size mismatch! Got {} bytes", frame.data.len());
             }
         }
         Err(e) => {
@@ -63,8 +57,8 @@ fn main() -> anyhow::Result<()> {
     match reader.read_frame(last_frame) {
         Ok(frame) => {
             println!("Successfully read frame {}", last_frame);
-            println!("Format: {:?}", frame.texture_format);
-            println!("Texture data size: {} bytes", frame.texture_data.len());
+            println!("Format: {:?}", frame.format);
+            println!("Texture data size: {} bytes", frame.data.len());
         }
         Err(e) => {
             eprintln!("Failed to read last frame: {}", e);

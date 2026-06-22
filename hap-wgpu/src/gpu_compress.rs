@@ -68,10 +68,7 @@ impl GpuDxtCompressor {
         width: u32,
         height: u32,
     ) -> Option<Self> {
-        match Self::new(device, queue, width, height) {
-            Ok(compressor) => Some(compressor),
-            Err(_) => None,
-        }
+        Self::new(device, queue, width, height).ok()
     }
 
     /// Create a new GPU DXT compressor for the given dimensions
@@ -88,8 +85,8 @@ impl GpuDxtCompressor {
         }
 
         // Pad to multiples of 4
-        let padded_w = ((width + 3) / 4) * 4;
-        let padded_h = ((height + 3) / 4) * 4;
+        let padded_w = width.div_ceil(4) * 4;
+        let padded_h = height.div_ceil(4) * 4;
         let blocks_x = padded_w / 4;
         let blocks_y = padded_h / 4;
 
@@ -366,6 +363,5 @@ mod tests {
         assert!(GpuDxtCompressor::supports_format(HapFormat::Hap1));
         assert!(GpuDxtCompressor::supports_format(HapFormat::HapY));
         assert!(!GpuDxtCompressor::supports_format(HapFormat::Hap7));
-        assert!(!GpuDxtCompressor::supports_format(HapFormat::HapH));
     }
 }

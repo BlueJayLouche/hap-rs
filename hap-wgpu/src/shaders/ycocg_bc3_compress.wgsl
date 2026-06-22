@@ -131,36 +131,48 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Load 16 pixels and convert to YCoCg
-    // Channel packing: [Co, Cg, Y, A] to match CPU encoder
-    var co_cg_pixels: array<vec3<f32>, 16>;  // (Co, Cg, 0) for BC1 color block
-    var y_values: array<f32, 16>;             // Y for alpha block
-
-    var min_color = vec3<f32>(255.0, 255.0, 255.0);
-    var max_color = vec3<f32>(0.0, 0.0, 0.0);
+    // Standard HAP "scaled YCoCg" (id Software YCoCg-DXT5):
+    //   color block carries (Co, Cg, scale-indicator), alpha block carries Y.
+    // Mirrors the CPU encoder in hap-qt's frame_encoder.rs.
+    var co_cg_pixels: array<vec3<f32>, 16>;  // (Co_scaled, Cg_scaled, blue)
+    var y_values: array<f32, 16>;            // Y for the alpha (BC4) block
+    var co_raw: array<f32, 16>;
+    var cg_raw: array<f32, 16>;
 
     let px_x = block_x * 4u;
     let px_y = block_y * 4u;
 
+    // Pass 1: YCoCg (Co/Cg centered at 128) and max chroma deviation.
+    var max_dev = 0.0;
     for (var y = 0u; y < 4u; y = y + 1u) {
         for (var x = 0u; x < 4u; x = x + 1u) {
-            let sx = px_x + x;
-            let sy = px_y + y;
-            let idx = sy * params.width + sx;
+            let idx = (px_y + y) * params.width + (px_x + x);
             let rgba = unpack_rgba(input_pixels[idx]);
-            let ycocg = rgb_to_ycocg(rgba.x, rgba.y, rgba.z);
-
+            let ycocg = rgb_to_ycocg(rgba.x, rgba.y, rgba.z); // (Y, Co, Cg)
             let pi = y * 4u + x;
-            // ycocg = (Y, Co, Cg)
             y_values[pi] = ycocg.x;
-
-            // For BC1 color block: treat as RGB where R=Co, G=Cg, B=Y
-            // This matches the CPU encoder's [Co, Cg, Y, A] packing
-            let color = vec3<f32>(ycocg.y, ycocg.z, ycocg.x);
-            co_cg_pixels[pi] = color;
-            min_color = min(min_color, color);
-            max_color = max(max_color, color);
+            co_raw[pi] = ycocg.y;
+            cg_raw[pi] = ycocg.z;
+            max_dev = max(max_dev, max(abs(ycocg.y - 128.0), abs(ycocg.z - 128.0)));
         }
+    }
+
+    // Per-block chroma scale in {1,2,4}; blue stores (scale-1)*8 so the decoder
+    // recovers it. Scaling expands chroma into more BC3 bits.
+    var scale = 1.0;
+    if max_dev <= 31.0 { scale = 4.0; } else if max_dev <= 63.0 { scale = 2.0; }
+    let blue = (scale - 1.0) * 8.0;
+
+    // Pass 2: build the scaled color block and its min/max for endpoint fitting.
+    var min_color = vec3<f32>(255.0, 255.0, 255.0);
+    var max_color = vec3<f32>(0.0, 0.0, 0.0);
+    for (var i = 0u; i < 16u; i = i + 1u) {
+        let co_s = clamp((co_raw[i] - 128.0) * scale + 128.0, 0.0, 255.0);
+        let cg_s = clamp((cg_raw[i] - 128.0) * scale + 128.0, 0.0, 255.0);
+        let color = vec3<f32>(co_s, cg_s, blue);
+        co_cg_pixels[i] = color;
+        min_color = min(min_color, color);
+        max_color = max(max_color, color);
     }
 
     // === Alpha block (8 bytes): encode Y values ===

@@ -1,6 +1,6 @@
 [package]
 name = "hap-parser"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["BlueJayLouche <bluejaylouche@gmail.com>"]
 description = "HAP video frame parser for Rust"
@@ -10,9 +10,8 @@ keywords = ["hap", "video", "codec", "dxt", "gpu"]
 categories = ["multimedia::video", "parser-implementations"]
 
 [dependencies]
-byteorder = "1.5"
 snap = "1.1"
-thiserror = "1.0"
+thiserror = "2.0"
 
 [dev-dependencies]
 anyhow = "1.0"

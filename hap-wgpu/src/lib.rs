@@ -52,6 +52,26 @@ pub mod gpu_compress;
 pub use encoder::{EncodeConfig, EncodeQuality, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError, pad_rgba};
 pub use gpu_compress::{GpuDxtCompressor, GpuCompressError};
 
+/// WGSL helper for displaying Hap Q frames.
+///
+/// Hap Q stores scaled YCoCg in a BC3 texture (`r=Co, g=Cg, b=scale, a=Y`),
+/// so a sampled texel is not RGB — every format where
+/// [`TextureFormat::needs_ycocg_convert`] is true must run this conversion in
+/// the fragment shader before display. Paste this snippet into your shader and
+/// call `hap_ycocg_to_rgb(textureSample(...))`. This is the canonical HAP
+/// scaled-YCoCg decode; it matches files from ffmpeg, Resolume and VDMX, and is
+/// the exact inverse of this workspace's HapY encoder.
+pub const YCOCG_TO_RGB_WGSL: &str = r#"
+fn hap_ycocg_to_rgb(c: vec4<f32>) -> vec3<f32> {
+    let offset = 128.0 / 255.0;
+    let scale = (c.b * (255.0 / 8.0)) + 1.0;
+    let co = (c.r - offset) / scale;
+    let cg = (c.g - offset) / scale;
+    let y = c.a;
+    return vec3<f32>(y + co - cg, y + cg, y - co - cg);
+}
+"#;
+
 /// Errors that can occur during HAP playback
 #[derive(Error, Debug)]
 pub enum HapPlayerError {
@@ -100,14 +120,13 @@ pub struct HapTexture {
 }
 
 impl HapTexture {
-    /// Create a HapTexture from raw DXT data
-    /// 
-    /// # Panics
-    /// 
-    /// Panics if the data size doesn't match the expected size for the given
-    /// dimensions and format. This indicates either:
-    /// - The dimensions from the container don't match the actual texture data
-    /// - The frame data is corrupted or incomplete
+    /// Create a `HapTexture` from raw decompressed BCn block data.
+    ///
+    /// `data` should already match `width`×`height` for `format` — use
+    /// [`hap_parser::detect_format`] so the format is correct. If the size does
+    /// not match, the buffer is padded or trimmed to the expected size and a
+    /// warning is logged, so a corrupt frame degrades gracefully instead of
+    /// panicking or overrunning the GPU copy.
     pub fn from_dxt_data(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -117,212 +136,33 @@ impl HapTexture {
         data: &[u8],
         frame_index: u32,
     ) -> Self {
-        // Get the wgpu format
         let wgpu_format = hap_format_to_wgpu(format);
-        
-        // Calculate BC block dimensions
-        // BC textures store data in 4x4 pixel blocks
-        let blocks_x = (width + 3) / 4;  // Round up to nearest 4
-        let blocks_y = (height + 3) / 4;
-        let bytes_per_block = bytes_per_block(format);
-        
-        // Calculate expected data size
+        let blocks_x = width.div_ceil(4);
+        let blocks_y = height.div_ceil(4);
+        let bytes_per_block = format.bytes_per_block();
         let expected_size = (blocks_x * blocks_y) as usize * bytes_per_block;
-        let actual_size = data.len();
-        
-        // Validate data size
-        let mut data = Cow::Borrowed(data);
-        
-        if actual_size != expected_size {
-            // Log detailed debugging info
+
+        // With correct format detection upstream the data is already the right
+        // size. A remaining mismatch means a corrupt/truncated frame.
+        // ponytail: replaces a ~180-line dimension-guessing search — if silent
+        // pad/trim ever proves wrong, surface a decode error to the caller instead.
+        let data: Cow<[u8]> = if data.len() == expected_size {
+            Cow::Borrowed(data)
+        } else {
             eprintln!(
-                "HAP FRAME SIZE MISMATCH - Frame {} ({}x{}, {:?}):\n\
-                 Expected: {} bytes ({} blocks x {} bytes/block = {}x{} blocks)\n\
-                 Actual:   {} bytes\n\
-                 Difference: {} bytes",
-                frame_index,
-                width, height, format,
-                expected_size,
-                blocks_x * blocks_y,
-                bytes_per_block,
-                blocks_x, blocks_y,
-                actual_size,
-                actual_size as i64 - expected_size as i64
+                "hap-wgpu: frame {frame_index} size mismatch ({width}x{height} {format:?}): \
+                 got {} bytes, expected {expected_size} — padding/trimming",
+                data.len()
             );
-            
-            // Check if data size is divisible by block size
-            // If not, it might have padding - try to trim to nearest block
-            let trimmed_size = (actual_size / bytes_per_block) * bytes_per_block;
-            
-            if actual_size % bytes_per_block != 0 {
-                eprintln!(
-                    "WARNING: Data size ({}) is not multiple of block size ({}). \
-                     Trimming to {} bytes ({} blocks).",
-                    actual_size, bytes_per_block, trimmed_size, trimmed_size / bytes_per_block
-                );
-                data = Cow::Owned(data[..trimmed_size].to_vec());
-            }
-            
-            let actual_size = data.len();
-            let actual_blocks = actual_size / bytes_per_block;
-            
-            // Try to determine actual dimensions from data size
-            // Strategy: find width/height that gives the right block count
-            // Prefer dimensions close to the reported dimensions
-            
-            let mut best_dimensions = None;
-            let mut best_error = f32::MAX;
-            
-            // Try different block heights
-            for blocks_h in 1..=actual_blocks {
-                if actual_blocks % blocks_h != 0 {
-                    continue;
-                }
-                let blocks_w = actual_blocks / blocks_h;
-                
-                // Calculate pixel dimensions (must be multiple of 4)
-                let test_width = (blocks_w * 4) as u32;
-                let test_height = (blocks_h * 4) as u32;
-                
-                // Skip if dimensions exceed wgpu limits (8192)
-                if test_width > 8192 || test_height > 8192 {
-                    continue;
-                }
-                
-                // Calculate error as deviation from reported dimensions (not aspect ratio)
-                // This handles cases where aspect ratio is preserved but scale is wrong
-                let width_ratio = test_width as f32 / width as f32;
-                let height_ratio = test_height as f32 / height as f32;
-                
-                // Prefer when both ratios are similar (preserves aspect ratio)
-                let ratio_diff = (width_ratio - height_ratio).abs();
-                
-                // Also penalize extreme dimensions
-                let scale_error = (width_ratio - 1.0).abs() + (height_ratio - 1.0).abs();
-                let total_error = ratio_diff * 10.0 + scale_error;
-                
-                if total_error < best_error {
-                    best_error = total_error;
-                    best_dimensions = Some((test_width, test_height, blocks_w as u32, blocks_h as u32));
-                }
-            }
-            
-            if let Some((calculated_width, calculated_height, blocks_x, blocks_y)) = best_dimensions {
-                eprintln!(
-                    "Using calculated dimensions: {}x{} pixels ({}x{} blocks, aspect ratio {:.3}, error {:.3})",
-                    calculated_width, calculated_height, blocks_x, blocks_y,
-                    calculated_width as f32 / calculated_height as f32, best_error
-                );
-                
-                let bytes_per_row = blocks_x * bytes_per_block as u32;
-                
-                // Create texture with calculated dimensions
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(&format!("HAP Frame {} (adjusted)", frame_index)),
-                    size: wgpu::Extent3d {
-                        width: calculated_width,
-                        height: calculated_height,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu_format,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                    view_formats: &[],
-                });
-                
-                queue.write_texture(
-                    wgpu::TexelCopyTextureInfo {
-                        texture: &texture,
-                        mip_level: 0,
-                        origin: wgpu::Origin3d::ZERO,
-                        aspect: wgpu::TextureAspect::All,
-                    },
-                    &data,
-                    wgpu::TexelCopyBufferLayout {
-                        offset: 0,
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(blocks_y),
-                    },
-                    wgpu::Extent3d {
-                        width: calculated_width,
-                        height: calculated_height,
-                        depth_or_array_layers: 1,
-                    },
-                );
-                
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                
-                return Self {
-                    texture: Arc::new(texture),
-                    view: Arc::new(view),
-                    frame_index,
-                    format,
-                };
-            }
-            
-            // Cannot find valid dimensions - create a small placeholder texture
-            // This allows the app to continue, though the frame will be blank
-            eprintln!(
-                "ERROR: Cannot find valid dimensions for frame {} with {} blocks. \
-                 Expected {}x{} {:?}. Creating placeholder texture.",
-                frame_index, actual_blocks, width, height, format
-            );
-            
-            // Create a 4x4 placeholder texture (minimum size for BC formats)
-            let placeholder_data = vec![0u8; bytes_per_block];
-            let texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some(&format!("HAP Frame {} (placeholder)", frame_index)),
-                size: wgpu::Extent3d {
-                    width: 4,
-                    height: 4,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu_format,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                view_formats: &[],
-            });
-            
-            queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                &placeholder_data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_block as u32),
-                    rows_per_image: Some(1),
-                },
-                wgpu::Extent3d {
-                    width: 4,
-                    height: 4,
-                    depth_or_array_layers: 1,
-                },
-            );
-            
-            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            
-            return Self {
-                texture: Arc::new(texture),
-                view: Arc::new(view),
-                frame_index,
-                format,
-            };
-        }
-        
-        // Calculate row pitch in bytes (bytes per row of blocks)
+            let mut buf = vec![0u8; expected_size];
+            let n = data.len().min(expected_size);
+            buf[..n].copy_from_slice(&data[..n]);
+            Cow::Owned(buf)
+        };
+
         let bytes_per_row = blocks_x * bytes_per_block as u32;
-        
-        // Create texture
         let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(&format!("HAP Frame {}", frame_index)),
+            label: Some(&format!("HAP Frame {frame_index}")),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -335,9 +175,6 @@ impl HapTexture {
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
-        
-        // Upload data
-        // For compressed textures, we specify the layout in terms of blocks
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &texture,
@@ -357,9 +194,8 @@ impl HapTexture {
                 depth_or_array_layers: 1,
             },
         );
-        
+
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        
         Self {
             texture: Arc::new(texture),
             view: Arc::new(view),
@@ -377,29 +213,13 @@ fn hap_format_to_wgpu(format: TextureFormat) -> wgpu::TextureFormat {
         TextureFormat::YcoCgDxt5 => wgpu::TextureFormat::Bc3RgbaUnorm,
         TextureFormat::AlphaRgtc1 => wgpu::TextureFormat::Bc4RUnorm,
         TextureFormat::RgbaBc7 => wgpu::TextureFormat::Bc7RgbaUnorm,
-        TextureFormat::RgbBc6hUfloat => wgpu::TextureFormat::Bc6hRgbUfloat,
-        TextureFormat::RgbBc6hSfloat => wgpu::TextureFormat::Bc6hRgbUfloat,
-    }
-}
-
-/// Get bytes per block for BC compressed format
-fn bytes_per_block(format: TextureFormat) -> usize {
-    match format {
-        // BC1/DXT1: 8 bytes per 4x4 block (64 bits)
-        TextureFormat::RgbDxt1 => 8,
-        // BC3/DXT5: 16 bytes per 4x4 block (128 bits)
-        TextureFormat::RgbaDxt5 | TextureFormat::YcoCgDxt5 => 16,
-        // BC4: 8 bytes per 4x4 block
-        TextureFormat::AlphaRgtc1 => 8,
-        // BC6H/BC7: 16 bytes per 4x4 block
-        TextureFormat::RgbaBc7 | TextureFormat::RgbBc6hUfloat | TextureFormat::RgbBc6hSfloat => 16,
     }
 }
 
 /// Calculate dimensions padded to multiple of 4 (required for DXT)
 pub fn padded_dimensions(width: u32, height: u32) -> (u32, u32) {
-    let padded_width = ((width + 3) / 4) * 4;
-    let padded_height = ((height + 3) / 4) * 4;
+    let padded_width = width.div_ceil(4) * 4;
+    let padded_height = height.div_ceil(4) * 4;
     (padded_width, padded_height)
 }
 
@@ -688,8 +508,8 @@ impl HapPlayer {
                     &self.queue,
                     self.padded_dimensions.0,
                     self.padded_dimensions.1,
-                    hap_frame.texture_format,
-                    &hap_frame.texture_data,
+                    hap_frame.format,
+                    &hap_frame.data,
                     frame,
                 );
                 Some(Arc::new(texture))

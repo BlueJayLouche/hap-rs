@@ -39,8 +39,6 @@ pub enum HapFormat {
     HapA,
     /// BC7 compression (High quality RGBA)
     Hap7,
-    /// BC6H compression (HDR RGB)
-    HapH,
 }
 
 impl HapFormat {
@@ -52,7 +50,6 @@ impl HapFormat {
             HapFormat::HapY => TextureFormat::YcoCgDxt5,
             HapFormat::HapA => TextureFormat::AlphaRgtc1,
             HapFormat::Hap7 => TextureFormat::RgbaBc7,
-            HapFormat::HapH => TextureFormat::RgbBc6hUfloat,
         }
     }
 
@@ -65,7 +62,6 @@ impl HapFormat {
             HapFormat::HapY => 0xAF,  // YCoCg-DXT5, no compression
             HapFormat::HapA => 0xA1,  // BC4/RGTC1, no compression
             HapFormat::Hap7 => 0xAC,  // BC7, no compression
-            HapFormat::HapH => 0xA2,  // BC6H unsigned, no compression
         }
     }
 
@@ -77,7 +73,6 @@ impl HapFormat {
             HapFormat::HapY => 0xBF,  // YCoCg-DXT5, Snappy
             HapFormat::HapA => 0xB1,  // BC4/RGTC1, Snappy
             HapFormat::Hap7 => 0xBC,  // BC7, Snappy
-            HapFormat::HapH => 0xB2,  // BC6H unsigned, Snappy
         }
     }
 
@@ -89,7 +84,6 @@ impl HapFormat {
             HapFormat::HapY => 16,  // YCoCg-DXT5: 16 bytes per 4x4 block
             HapFormat::HapA => 8,   // BC4: 8 bytes per 4x4 block
             HapFormat::Hap7 => 16,  // BC7: 16 bytes per 4x4 block
-            HapFormat::HapH => 16,  // BC6H: 16 bytes per 4x4 block
         }
     }
 
@@ -101,7 +95,6 @@ impl HapFormat {
             HapFormat::HapY => "HapY",
             HapFormat::HapA => "HapA",
             HapFormat::Hap7 => "Hap7",
-            HapFormat::HapH => "HapH",
         }
     }
 
@@ -126,22 +119,19 @@ pub enum CompressionMode {
 /// For live performance encoding, use `Fast`. For offline/import encoding,
 /// use `Balanced` or `Best`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum DxtQuality {
     /// RangeFit: ~2x faster than Balanced, slightly lower quality.
     /// Recommended for live recording and real-time encoding.
     Fast,
     /// ClusterFit (default): good balance of speed and quality.
+    #[default]
     Balanced,
     /// IterativeClusterFit: best quality, slowest.
     /// Recommended for final export / archival.
     Best,
 }
 
-impl Default for DxtQuality {
-    fn default() -> Self {
-        DxtQuality::Balanced
-    }
-}
 
 #[cfg(feature = "cpu-compression")]
 impl DxtQuality {
@@ -193,8 +183,8 @@ impl HapFrameEncoder {
         }
 
         // HAP requires dimensions to be padded to multiples of 4
-        let padded_width = ((width + 3) / 4) * 4;
-        let padded_height = ((height + 3) / 4) * 4;
+        let padded_width = width.div_ceil(4) * 4;
+        let padded_height = height.div_ceil(4) * 4;
 
         // Calculate number of DXT blocks
         let blocks_x = padded_width / 4;
@@ -387,7 +377,6 @@ impl HapFrameEncoder {
             HapFormat::HapY => self.compress_ycocg_dxt5(rgba_data),
             HapFormat::HapA => self.compress_bc4(rgba_data),
             HapFormat::Hap7 => self.compress_bc7(rgba_data),
-            HapFormat::HapH => self.compress_bc6h(rgba_data),
         }
     }
 
@@ -448,26 +437,11 @@ impl HapFrameEncoder {
     #[cfg(feature = "cpu-compression")]
     fn compress_ycocg_dxt5(&self, rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
         let block_count = (self.blocks_x * self.blocks_y) as usize;
-        
-        // First convert entire image to YCoCg format
-        let mut ycocg_data = vec![0u8; rgba_data.len()];
-        for (src_chunk, dst_chunk) in rgba_data.chunks_exact(4).zip(ycocg_data.chunks_exact_mut(4)) {
-            let r = src_chunk[0] as i32;
-            let g = src_chunk[1] as i32;
-            let b = src_chunk[2] as i32;
-            let a = src_chunk[3];
 
-            let y = ((r + 2*g + b) / 4) as u8;
-            let co = ((r - b) / 2 + 128) as u8;
-            let cg = ((-r + 2*g - b) / 4 + 128) as u8;
+        // Transform to standard scaled-YCoCg layout, then BC3-compress as usual.
+        let ycocg_data =
+            rgb_to_scaled_ycocg_bc3_input(rgba_data, self.padded_width, self.padded_height);
 
-            dst_chunk[0] = co;
-            dst_chunk[1] = cg;
-            dst_chunk[2] = y;
-            dst_chunk[3] = a;
-        }
-
-        // Compress entire image at once
         let mut output = vec![0u8; block_count * 16];
         texpresso::Format::Bc3.compress(
             &ycocg_data,
@@ -539,23 +513,6 @@ impl HapFrameEncoder {
         ))
     }
 
-    /// Compress RGB data to BC6H format
-    #[cfg(feature = "cpu-compression")]
-    fn compress_bc6h(&self, _rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
-        // BC6H compression is for HDR content and very complex
-        Err(HapEncodeError::UnsupportedFormat(
-            "BC6H compression not yet implemented".to_string()
-        ))
-    }
-
-    /// Compress RGB data to BC6H format (fallback)
-    #[cfg(not(feature = "cpu-compression"))]
-    fn compress_bc6h(&self, _rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
-        Err(HapEncodeError::UnsupportedFormat(
-            "BC6H compression requires 'cpu-compression' feature".to_string()
-        ))
-    }
-
     /// Build HAP frame header according to HAP spec
     ///
     /// Simple frames (no second-stage compression):
@@ -596,9 +553,108 @@ impl HapFrameEncoder {
     }
 }
 
+/// Transform a padded RGBA image into the BC3 input for standard HAP "scaled
+/// YCoCg" (Hap Q): the color block carries `(Co, Cg, scale-indicator)` and the
+/// alpha block carries `Y`, with a per-4×4-block chroma scale ∈ {1,2,4} chosen
+/// the way the id Software YCoCg-DXT5 compressor does. Feeding this to a normal
+/// BC3 encoder yields a frame that decodes correctly in ffmpeg/Resolume/VDMX;
+/// the matching display conversion is `hap_wgpu::YCOCG_TO_RGB_WGSL`.
+///
+/// `width`/`height` must be multiples of 4 and match `rgba` (4 bytes/pixel).
+fn rgb_to_scaled_ycocg_bc3_input(rgba: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let mut out = vec![0u8; rgba.len()];
+    for by in 0..h / 4 {
+        for bx in 0..w / 4 {
+            let mut y = [0u8; 16];
+            let mut co = [0i32; 16];
+            let mut cg = [0i32; 16];
+            let mut max_dev = 0i32;
+            for py in 0..4 {
+                for px in 0..4 {
+                    let i = ((by * 4 + py) * w + (bx * 4 + px)) * 4;
+                    let (r, g, b) = (rgba[i] as i32, rgba[i + 1] as i32, rgba[i + 2] as i32);
+                    let k = py * 4 + px;
+                    y[k] = ((r + 2 * g + b) / 4).clamp(0, 255) as u8;
+                    co[k] = (r - b) / 2 + 128;
+                    cg[k] = (-r + 2 * g - b) / 4 + 128;
+                    max_dev = max_dev.max((co[k] - 128).abs()).max((cg[k] - 128).abs());
+                }
+            }
+            // Chroma scale: expand chroma into more BC3 bits when its range is
+            // small. `blue` = (scale-1)*8 so the decoder can recover the scale.
+            let scale = if max_dev <= 31 { 4 } else if max_dev <= 63 { 2 } else { 1 };
+            let blue = ((scale - 1) * 8) as u8;
+            for py in 0..4 {
+                for px in 0..4 {
+                    let i = ((by * 4 + py) * w + (bx * 4 + px)) * 4;
+                    let k = py * 4 + px;
+                    out[i] = ((co[k] - 128) * scale + 128).clamp(0, 255) as u8; // R = Co
+                    out[i + 1] = ((cg[k] - 128) * scale + 128).clamp(0, 255) as u8; // G = Cg
+                    out[i + 2] = blue; // B = scale indicator
+                    out[i + 3] = y[k]; // A = Y
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reference decode mirroring `hap_wgpu::YCOCG_TO_RGB_WGSL`, in byte space.
+    fn scaled_ycocg_to_rgb(px: [u8; 4]) -> [u8; 3] {
+        let scale = (px[2] as f32 / 8.0) + 1.0;
+        let co = (px[0] as f32 - 128.0) / scale;
+        let cg = (px[1] as f32 - 128.0) / scale;
+        let yy = px[3] as f32;
+        let f = |v: f32| v.round().clamp(0.0, 255.0) as u8;
+        [f(yy + co - cg), f(yy + cg), f(yy - co - cg)]
+    }
+
+    #[test]
+    fn scaled_ycocg_roundtrips() {
+        // A 4×4 block of representative colors; encode → decode → compare.
+        let colors: [[u8; 3]; 16] = [
+            [0, 0, 0], [255, 255, 255], [128, 128, 128], [200, 100, 50],
+            [10, 180, 220], [60, 60, 60], [240, 30, 30], [30, 240, 30],
+            [30, 30, 240], [170, 170, 40], [40, 170, 170], [170, 40, 170],
+            [90, 120, 150], [150, 120, 90], [12, 34, 56], [201, 99, 7],
+        ];
+        let mut rgba = Vec::new();
+        for c in &colors {
+            rgba.extend_from_slice(&[c[0], c[1], c[2], 255]);
+        }
+        let enc = rgb_to_scaled_ycocg_bc3_input(&rgba, 4, 4);
+        for (k, c) in colors.iter().enumerate() {
+            let px = [enc[k * 4], enc[k * 4 + 1], enc[k * 4 + 2], enc[k * 4 + 3]];
+            let got = scaled_ycocg_to_rgb(px);
+            for ch in 0..3 {
+                let diff = (got[ch] as i32 - c[ch] as i32).abs();
+                assert!(diff <= 6, "channel {ch} of {c:?} -> {got:?} (diff {diff})");
+            }
+        }
+    }
+
+    #[test]
+    fn scaled_ycocg_grayscale_is_exact() {
+        // Grayscale has zero chroma, so it must round-trip exactly.
+        let mut rgba = Vec::new();
+        for v in 0..16u8 {
+            let g = v * 16;
+            rgba.extend_from_slice(&[g, g, g, 255]);
+        }
+        let enc = rgb_to_scaled_ycocg_bc3_input(&rgba, 4, 4);
+        for v in 0..16usize {
+            let px = [enc[v * 4], enc[v * 4 + 1], enc[v * 4 + 2], enc[v * 4 + 3]];
+            let got = scaled_ycocg_to_rgb(px);
+            let g = (v as u8) * 16;
+            assert_eq!(got, [g, g, g], "grayscale {g} must be exact");
+        }
+    }
 
     #[test]
     fn test_hap_format_properties() {
