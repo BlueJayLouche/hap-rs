@@ -1,6 +1,6 @@
 [package]
 name = "hap-qt"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 authors = ["BlueJayLouche <bluejaylouche@gmail.com>"]
 description = "QuickTime container reader for HAP video"
@@ -10,9 +10,9 @@ keywords = ["hap", "video", "quicktime", "mov", "mp4"]
 categories = ["multimedia::video", "parser-implementations"]
 
 [dependencies]
-hap-parser = { path = "../hap-parser", version = "0.1.0" }
+hap-parser = { path = "../hap-parser", version = "0.2.0" }
 byteorder = "1.5"
-thiserror = "1.0"
+thiserror = "2.0"
 memmap2 = "0.9"
 
 # Snappy compression for HAP encoding
@@ -27,4 +27,4 @@ cpu-compression = ["texpresso"]
 
 [dev-dependencies]
 anyhow = "1.0"
-hap-parser = { path = "../hap-parser", version = "0.1.0" }
+hap-parser = { path = "../hap-parser", version = "0.2.0" }

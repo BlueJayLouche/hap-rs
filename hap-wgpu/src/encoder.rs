@@ -5,7 +5,8 @@
 
 use crate::gpu_compress::{GpuCompressError, GpuDxtCompressor};
 use hap_qt::{
-    CompressionMode, HapEncodeError, HapFormat, HapFrameEncoder, QtHapWriter, QtWriterError,
+    CompressionMode, DxtQuality, HapEncodeError, HapFormat, HapFrameEncoder, QtHapWriter,
+    QtWriterError,
     VideoConfig,
 };
 use std::path::Path;
@@ -37,36 +38,6 @@ pub enum VideoEncoderError {
     GpuCompressError(#[from] GpuCompressError),
 }
 
-/// Encoding quality preset
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EncodeQuality {
-    /// Fastest encoding, lower quality (less DXT search)
-    Fast,
-    /// Balanced quality and speed
-    Balanced,
-    /// Slowest encoding, best quality (higher DXT search)
-    Best,
-}
-
-impl EncodeQuality {
-    /// Get texpresso quality parameters
-    /// Get texpresso quality parameters
-    #[allow(dead_code)]
-    #[cfg(feature = "cpu-compression")]
-    fn texpresso_params(&self) -> texpresso::Params {
-        match self {
-            EncodeQuality::Fast => texpresso::Params {
-                algorithm: texpresso::Algorithm::RangeFit,
-                ..Default::default()
-            },
-            EncodeQuality::Balanced => texpresso::Params::default(),
-            EncodeQuality::Best => texpresso::Params {
-                algorithm: texpresso::Algorithm::IterativeClusterFit,
-                ..Default::default()
-            },
-        }
-    }
-}
 
 /// Configuration for video encoding
 #[derive(Clone, Debug)]
@@ -79,8 +50,8 @@ pub struct EncodeConfig {
     pub fps: f32,
     /// Total number of frames to encode
     pub frame_count: u32,
-    /// Encoding quality preset
-    pub quality: EncodeQuality,
+    /// Compression quality preset
+    pub quality: DxtQuality,
     /// HAP format variant
     pub format: HapFormat,
     /// Use Snappy compression (default: true)
@@ -95,7 +66,7 @@ impl EncodeConfig {
             height,
             fps,
             frame_count,
-            quality: EncodeQuality::Balanced,
+            quality: DxtQuality::default(),
             format: HapFormat::HapY, // Good default for quality
             use_snappy: true,
         }
@@ -108,7 +79,7 @@ impl EncodeConfig {
     }
 
     /// Set the quality preset
-    pub fn with_quality(mut self, quality: EncodeQuality) -> Self {
+    pub fn with_quality(mut self, quality: DxtQuality) -> Self {
         self.quality = quality;
         self
     }
@@ -145,7 +116,7 @@ impl HapVideoEncoder {
     /// ```no_run
     /// # use std::sync::Arc;
     /// # async fn example() -> anyhow::Result<()> {
-    /// # let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    /// # let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     /// # let adapter = instance.request_adapter(&Default::default()).await.unwrap();
     /// # let (device, queue) = adapter.request_device(&Default::default()).await.unwrap();
     /// use hap_wgpu::HapVideoEncoder;
@@ -227,6 +198,9 @@ impl HapVideoEncoder {
             CompressionMode::None
         };
         frame_encoder.set_compression(compression);
+        // The CPU path needs this too, otherwise config.quality only affects
+        // GPU encodes and is silently inert everywhere else.
+        frame_encoder.set_quality(config.quality);
 
         let video_config = VideoConfig {
             width: config.width,
@@ -262,7 +236,7 @@ impl HapVideoEncoder {
                     rgba_data
                 };
 
-                let dxt_data = gpu.compress(&padded, config.format)?;
+                let dxt_data = gpu.compress(&padded, config.format, config.quality)?;
                 frame_encoder.encode_from_dxt(&dxt_data)?
             } else {
                 // CPU path: full encode (DXT + Snappy + header)
@@ -458,7 +432,7 @@ mod tests {
     fn test_encode_config() {
         let config = EncodeConfig::new(1920, 1080, 30.0, 300)
             .with_format(HapFormat::Hap5)
-            .with_quality(EncodeQuality::Best)
+            .with_quality(DxtQuality::Best)
             .with_snappy(true);
 
         assert_eq!(config.width, 1920);
@@ -466,7 +440,7 @@ mod tests {
         assert_eq!(config.fps, 30.0);
         assert_eq!(config.frame_count, 300);
         assert_eq!(config.format, HapFormat::Hap5);
-        assert_eq!(config.quality, EncodeQuality::Best);
+        assert_eq!(config.quality, DxtQuality::Best);
         assert!(config.use_snappy);
     }
 
@@ -475,7 +449,7 @@ mod tests {
         let config = EncodeConfig::new(1920, 1080, 30.0, 300);
 
         assert_eq!(config.format, HapFormat::HapY); // Default
-        assert_eq!(config.quality, EncodeQuality::Balanced); // Default
+        assert_eq!(config.quality, DxtQuality::Balanced); // Default
         assert!(config.use_snappy); // Default
     }
 

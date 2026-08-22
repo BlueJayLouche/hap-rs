@@ -35,7 +35,7 @@ fn main() -> anyhow::Result<()> {
     );
     
     // Create wgpu instance
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     let surface = instance.create_surface(window.clone())?;
     
     let adapter = pollster::block_on(async {
@@ -43,6 +43,7 @@ fn main() -> anyhow::Result<()> {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            ..Default::default()
         }).await.expect("Failed to find suitable adapter")
     });
     
@@ -61,6 +62,7 @@ fn main() -> anyhow::Result<()> {
                 required_limits: wgpu::Limits::default(),
                 memory_hints: wgpu::MemoryHints::default(),
                 trace: wgpu::Trace::Off,
+                experimental_features: wgpu::ExperimentalFeatures::default(),
             },
         ).await.expect("Failed to create device")
     });

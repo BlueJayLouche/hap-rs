@@ -6,7 +6,7 @@
 //! Usage:
 //!   cargo run --example encode_hap -- [output.mov] [width] [height] [frames]
 
-use hap_wgpu::{EncodeConfig, EncodeQuality, HapFormat, HapVideoEncoder};
+use hap_wgpu::{DxtQuality, EncodeConfig, HapFormat, HapVideoEncoder};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -30,7 +30,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     // Initialize wgpu
-    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
     
     let adapter = pollster::block_on(async {
         instance
@@ -57,6 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
+                    experimental_features: wgpu::ExperimentalFeatures::default(),
                 },
             )
             .await
@@ -69,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Configure encoding
     let config = EncodeConfig::new(width, height, 30.0, frame_count)
         .with_format(HapFormat::HapY)  // High quality RGB
-        .with_quality(EncodeQuality::Balanced)
+        .with_quality(DxtQuality::Balanced)
         .with_snappy(true);
     
     println!("Encoding {} frames...", frame_count);

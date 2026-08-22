@@ -3,7 +3,7 @@
 //! Uses wgpu compute shaders to compress RGBA pixels to DXT/BCn formats.
 //! Falls back gracefully to CPU compression when GPU is unavailable.
 
-use hap_qt::HapFormat;
+use hap_qt::{DxtQuality, HapFormat};
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -31,6 +31,18 @@ struct CompressParams {
     height: u32,
     blocks_x: u32,
     blocks_y: u32,
+    /// Endpoint-refinement rounds per block; 0 is the plain bounding-box fit.
+    refine_iters: u32,
+    /// Uniform buffers need a size that is a multiple of 16 bytes.
+    _pad: [u32; 3],
+}
+
+/// Prepend the shared endpoint-refinement helpers to a shader.
+///
+/// WGSL has no include mechanism, so the common refit code is concatenated at
+/// pipeline-creation time instead of being duplicated into every shader.
+fn with_refit(source: &str) -> String {
+    format!("{}\n{}", include_str!("shaders/_refit.wgsl"), source)
 }
 
 /// GPU DXT compressor using wgpu compute shaders
@@ -43,6 +55,7 @@ pub struct GpuDxtCompressor {
     bc3_pipeline: wgpu::ComputePipeline,
     bc4_pipeline: wgpu::ComputePipeline,
     ycocg_bc3_pipeline: wgpu::ComputePipeline,
+    bc7_pipeline: wgpu::ComputePipeline,
 
     // Shared bind group layout
     bind_group_layout: wgpu::BindGroupLayout,
@@ -68,10 +81,7 @@ impl GpuDxtCompressor {
         width: u32,
         height: u32,
     ) -> Option<Self> {
-        match Self::new(device, queue, width, height) {
-            Ok(compressor) => Some(compressor),
-            Err(_) => None,
-        }
+        Self::new(device, queue, width, height).ok()
     }
 
     /// Create a new GPU DXT compressor for the given dimensions
@@ -88,8 +98,8 @@ impl GpuDxtCompressor {
         }
 
         // Pad to multiples of 4
-        let padded_w = ((width + 3) / 4) * 4;
-        let padded_h = ((height + 3) / 4) * 4;
+        let padded_w = width.div_ceil(4) * 4;
+        let padded_h = height.div_ceil(4) * 4;
         let blocks_x = padded_w / 4;
         let blocks_y = padded_h / 4;
 
@@ -140,19 +150,23 @@ impl GpuDxtCompressor {
             immediate_size: 0,
         });
 
-        // Create compute pipelines from embedded WGSL shaders
+        // Create compute pipelines from embedded WGSL shaders.
+        // Every shader is prefixed with the shared endpoint-refinement helpers
+        // (WGSL has no include mechanism).
         let bc1_pipeline =
-            Self::create_pipeline(&device, &pipeline_layout, "bc1", include_str!("shaders/bc1_compress.wgsl"));
+            Self::create_pipeline(&device, &pipeline_layout, "bc1", &with_refit(include_str!("shaders/bc1_compress.wgsl")));
         let bc3_pipeline =
-            Self::create_pipeline(&device, &pipeline_layout, "bc3", include_str!("shaders/bc3_compress.wgsl"));
+            Self::create_pipeline(&device, &pipeline_layout, "bc3", &with_refit(include_str!("shaders/bc3_compress.wgsl")));
         let bc4_pipeline =
-            Self::create_pipeline(&device, &pipeline_layout, "bc4", include_str!("shaders/bc4_compress.wgsl"));
+            Self::create_pipeline(&device, &pipeline_layout, "bc4", &with_refit(include_str!("shaders/bc4_compress.wgsl")));
         let ycocg_bc3_pipeline = Self::create_pipeline(
             &device,
             &pipeline_layout,
             "ycocg_bc3",
-            include_str!("shaders/ycocg_bc3_compress.wgsl"),
+            &with_refit(include_str!("shaders/ycocg_bc3_compress.wgsl")),
         );
+        let bc7_pipeline =
+            Self::create_pipeline(&device, &pipeline_layout, "bc7", &with_refit(include_str!("shaders/bc7_compress.wgsl")));
 
         // Allocate buffers
         let input_size = (padded_w * padded_h * 4) as u64;
@@ -193,6 +207,8 @@ impl GpuDxtCompressor {
             height: padded_h,
             blocks_x,
             blocks_y,
+            refine_iters: DxtQuality::default().refine_iters(),
+            _pad: [0; 3],
         };
         queue.write_buffer(&params_buffer, 0, bytemuck::bytes_of(&params));
 
@@ -203,6 +219,7 @@ impl GpuDxtCompressor {
             bc3_pipeline,
             bc4_pipeline,
             ycocg_bc3_pipeline,
+            bc7_pipeline,
             bind_group_layout,
             input_buffer,
             output_buffer,
@@ -215,6 +232,7 @@ impl GpuDxtCompressor {
         })
     }
 
+    /// Prefix a shader with the shared endpoint-refinement helpers.
     fn create_pipeline(
         device: &wgpu::Device,
         layout: &wgpu::PipelineLayout,
@@ -248,6 +266,7 @@ impl GpuDxtCompressor {
         &self,
         rgba_data: &[u8],
         format: HapFormat,
+        quality: DxtQuality,
     ) -> Result<Vec<u8>, GpuCompressError> {
         let expected_input = (self.width * self.height * 4) as usize;
         if rgba_data.len() != expected_input {
@@ -262,10 +281,24 @@ impl GpuDxtCompressor {
             HapFormat::Hap5 => (&self.bc3_pipeline, 16u32),
             HapFormat::HapY => (&self.ycocg_bc3_pipeline, 16u32),
             HapFormat::HapA => (&self.bc4_pipeline, 8u32),
-            _ => return Err(GpuCompressError::UnsupportedFormat(format)),
+            HapFormat::Hap7 => (&self.bc7_pipeline, 16u32),
         };
 
         let output_size = (self.blocks_x * self.blocks_y * bytes_per_block) as u64;
+
+        // Refresh params: only the refinement count varies per call.
+        self.queue.write_buffer(
+            &self.params_buffer,
+            0,
+            bytemuck::bytes_of(&CompressParams {
+                width: self.width,
+                height: self.height,
+                blocks_x: self.blocks_x,
+                blocks_y: self.blocks_y,
+                refine_iters: quality.refine_iters(),
+                _pad: [0; 3],
+            }),
+        );
 
         // Upload RGBA data to input buffer
         self.queue
@@ -327,7 +360,9 @@ impl GpuDxtCompressor {
             .map_err(|e| GpuCompressError::BufferMapFailed(e.to_string()))?
             .map_err(|e| GpuCompressError::BufferMapFailed(format!("{:?}", e)))?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| GpuCompressError::BufferMapFailed(format!("{:?}", e)))?;
         let result = data.to_vec();
         drop(data);
         self.readback_buffer.unmap();
@@ -337,12 +372,21 @@ impl GpuDxtCompressor {
 
     /// Get the supported formats for GPU compression
     pub fn supported_formats() -> &'static [HapFormat] {
-        &[HapFormat::Hap1, HapFormat::Hap5, HapFormat::HapY, HapFormat::HapA]
+        &[
+            HapFormat::Hap1,
+            HapFormat::Hap5,
+            HapFormat::HapY,
+            HapFormat::HapA,
+            HapFormat::Hap7,
+        ]
     }
 
     /// Check if a format is supported for GPU compression
     pub fn supports_format(format: HapFormat) -> bool {
-        matches!(format, HapFormat::Hap1 | HapFormat::Hap5 | HapFormat::HapY | HapFormat::HapA)
+        matches!(
+            format,
+            HapFormat::Hap1 | HapFormat::Hap5 | HapFormat::HapY | HapFormat::HapA | HapFormat::Hap7
+        )
     }
 
     /// Get the configured dimensions
@@ -357,15 +401,16 @@ mod tests {
 
     #[test]
     fn test_compress_params_layout() {
-        // Verify CompressParams is the right size for uniform buffer
-        assert_eq!(std::mem::size_of::<CompressParams>(), 16);
+        // Uniform buffers require a size that is a multiple of 16 bytes, and
+        // the WGSL `Params` in _refit.wgsl must match this layout exactly.
+        assert_eq!(std::mem::size_of::<CompressParams>(), 32);
+        assert_eq!(std::mem::size_of::<CompressParams>() % 16, 0);
     }
 
     #[test]
     fn test_supported_formats() {
         assert!(GpuDxtCompressor::supports_format(HapFormat::Hap1));
         assert!(GpuDxtCompressor::supports_format(HapFormat::HapY));
-        assert!(!GpuDxtCompressor::supports_format(HapFormat::Hap7));
-        assert!(!GpuDxtCompressor::supports_format(HapFormat::HapH));
+        assert!(GpuDxtCompressor::supports_format(HapFormat::Hap7));
     }
 }

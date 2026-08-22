@@ -123,13 +123,13 @@ impl QtHapWriter {
         // We'll write mdat first, then moov (modern fast-start format)
 
         // Write mdat atom header
-        let _mdat_start = file.seek(SeekFrom::Current(0))?;
+        let _mdat_start = file.stream_position()?;
         // Write placeholder size (will update if needed, or use extended size)
         file.write_u32::<BigEndian>(1)?; // Extended size indicator
         file.write_all(b"mdat")?;
         file.write_u64::<BigEndian>(0)?; // Placeholder for extended size
 
-        let mdat_data_start = file.seek(SeekFrom::Current(0))?;
+        let mdat_data_start = file.stream_position()?;
 
         Ok(Self {
             file,
@@ -210,7 +210,7 @@ impl QtHapWriter {
         self.file.seek(SeekFrom::Start(self.mdat_data_start - 16))?;
         self.file.write_u32::<BigEndian>(1)?;
         self.file.write_all(b"mdat")?;
-        self.file.write_u64::<BigEndian>(mdat_atom_size as u64)?;
+        self.file.write_u64::<BigEndian>(mdat_atom_size)?;
 
         // Seek to end to write moov
         self.file.seek(SeekFrom::End(0))?;
@@ -253,7 +253,7 @@ impl QtHapWriter {
         self.file.seek(SeekFrom::Start(self.mdat_data_start - 16))?;
         self.file.write_u32::<BigEndian>(1)?; // Extended size indicator
         self.file.write_all(b"mdat")?;
-        self.file.write_u64::<BigEndian>(mdat_atom_size as u64)?;
+        self.file.write_u64::<BigEndian>(mdat_atom_size)?;
 
         // Seek to end to write moov
         self.file.seek(SeekFrom::End(0))?;
@@ -946,7 +946,7 @@ mod tests {
             // Read every frame
             for i in 0..frame_count {
                 let frame = reader.read_frame(i).unwrap();
-                assert!(!frame.texture_data.is_empty());
+                assert!(!frame.data.is_empty());
             }
         }
 

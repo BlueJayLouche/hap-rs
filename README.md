@@ -29,7 +29,15 @@ This workspace provides tools for encoding, decoding, and playing back HAP video
 ### Decoding
 - ✅ Parse HAP frames from QuickTime .mov files
 - ✅ GPU-accelerated playback
-- ✅ All HAP variants supported
+- ✅ All standard variants: Hap, Hap Alpha, Hap Q, Hap Q Alpha (dual-plane), Hap R
+
+`HapY` (Hap Q) is encoded as standard scaled YCoCg (id Software YCoCg-DXT5),
+so the files it produces interoperate with Resolume, VDMX and ffmpeg. To
+display Hap Q yourself, run the YCoCg→RGB conversion in `hap-wgpu`'s
+`YCOCG_TO_RGB_WGSL` after GPU decode (any format where
+`TextureFormat::needs_ycocg_convert()` is true). The CPU encoder is covered by
+a round-trip test; the GPU compute shader mirrors it and is naga-validated, but
+its numerical output is best confirmed on real hardware.
 
 ## Quick Start
 
@@ -93,7 +101,7 @@ let mut reader = QtHapReader::open("video.mov")?;
 println!("{}x{} @ {} fps", reader.resolution().0, reader.resolution().1, reader.fps());
 
 let frame = reader.read_frame(0)?;
-println!("Format: {:?}", frame.texture_format);
+println!("Format: {:?}", frame.format);
 ```
 
 ## HAP Video Format
@@ -108,12 +116,12 @@ HAP is a GPU-accelerated video codec using S3TC/DXT texture compression:
 
 | Format | Compression | Use Case |
 |--------|-------------|----------|
-| Hap1 | DXT1 | RGB, smallest size |
-| Hap5 | DXT5 | RGBA with alpha |
-| HapY | YCoCg-DXT5 | High quality RGB |
+| Hap1 (Hap) | DXT1 / BC1 | RGB, smallest size |
+| Hap5 (Hap Alpha) | DXT5 / BC3 | RGBA with alpha |
+| HapY (Hap Q) | scaled YCoCg DXT5 | High quality RGB (needs YCoCg→RGB on display) |
+| HapM (Hap Q Alpha) | YCoCg + BC4 | High quality RGB with alpha (dual-plane, decode) |
 | HapA | BC4 | Alpha only |
-| Hap7 | BC7 | High quality RGBA (decode only) |
-| HapH | BC6H | HDR (decode only) |
+| Hap7 (Hap R) | BC7 | High quality RGBA |
 
 ## License
 

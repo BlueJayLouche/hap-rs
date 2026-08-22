@@ -9,9 +9,10 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use thiserror::Error;
 
-pub use hap_parser::{HapFrame, TextureFormat, TopLevelType};
+pub use hap_parser::{HapFrame, TextureFormat};
 
 // Encoding modules
+pub mod bc7;
 pub mod frame_encoder;
 pub mod writer;
 
@@ -153,7 +154,6 @@ impl QtHapReader {
             "HapY" => hap_parser::TextureFormat::YcoCgDxt5,
             "HapA" => hap_parser::TextureFormat::AlphaRgtc1,
             "Hap7" => hap_parser::TextureFormat::RgbaBc7,
-            "HapH" => hap_parser::TextureFormat::RgbBc6hUfloat,
             _ => hap_parser::TextureFormat::RgbDxt1, // Default to DXT1
         }
     }
@@ -195,7 +195,7 @@ impl QtHapReader {
         
         // Parse HAP frame
         hap_parser::parse_frame(&frame_data)
-            .map_err(|e| QtError::HapError(e))
+            .map_err(QtError::HapError)
     }
     
     /// Convert frame index to (chunk_index, sample_offset_within_chunk)
@@ -434,8 +434,8 @@ impl QtHapReader {
         cursor.seek(SeekFrom::Current(36))?;
         
         // Width and height (16.16 fixed point)
-        let width = (cursor.read_u32::<BigEndian>()? >> 16) as u32;
-        let height = (cursor.read_u32::<BigEndian>()? >> 16) as u32;
+        let width = cursor.read_u32::<BigEndian>()? >> 16;
+        let height = cursor.read_u32::<BigEndian>()? >> 16;
         
         // We need track ID from earlier, but we skipped it - parse again
         cursor.set_position(4); // After version/flags
@@ -819,7 +819,7 @@ mod tests {
             },
         ];
         
-        let track = VideoTrack {
+        let _track = VideoTrack {
             track_id: 1,
             width: 1280,
             height: 720,
