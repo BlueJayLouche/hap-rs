@@ -113,9 +113,11 @@ pub enum CompressionMode {
     Snappy,
 }
 
-/// DXT compression quality preset
+/// Compression quality preset
 ///
-/// Controls the speed/quality tradeoff for CPU-based DXT compression.
+/// Controls the speed/quality tradeoff for CPU-based compression: the
+/// texpresso algorithm for the DXT formats, and the number of endpoint
+/// refinement rounds for BC7 (Hap R).
 /// For live performance encoding, use `Fast`. For offline/import encoding,
 /// use `Balanced` or `Best`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +134,22 @@ pub enum DxtQuality {
     Best,
 }
 
+
+impl DxtQuality {
+    /// Maximum least-squares endpoint refits per block.
+    ///
+    /// Used by the CPU BC7 encoder and by the GPU compute shaders, which share
+    /// the same refit-and-reindex loop. Each round is kept only if it lowers
+    /// the block error, so a round that converges early costs nothing and more
+    /// iterations can never make a block worse.
+    pub fn refine_iters(self) -> u32 {
+        match self {
+            DxtQuality::Fast => 0,
+            DxtQuality::Balanced => 2,
+            DxtQuality::Best => 6,
+        }
+    }
+}
 
 #[cfg(feature = "cpu-compression")]
 impl DxtQuality {
@@ -466,18 +484,20 @@ impl HapFrameEncoder {
     #[cfg(feature = "cpu-compression")]
     fn compress_bc4(&self, rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
         let block_count = (self.blocks_x * self.blocks_y) as usize;
-        
-        // Extract alpha channel from entire image
+
+        // texpresso's BC4 reads channel 0 (red) of an RGBA buffer, so move the
+        // alpha channel into red and keep the layout four bytes per pixel.
+        // Handing it a single-channel plane reads past the end of the slice.
+        // The GPU shader compresses the input's alpha, so this must match.
         let pixel_count = (self.padded_width * self.padded_height) as usize;
-        let mut alpha_data = vec![0u8; pixel_count];
-        for (i, alpha) in alpha_data.iter_mut().enumerate() {
-            *alpha = rgba_data[i * 4 + 3];
+        let mut alpha_as_red = vec![0u8; pixel_count * 4];
+        for i in 0..pixel_count {
+            alpha_as_red[i * 4] = rgba_data[i * 4 + 3];
         }
 
-        // Compress entire alpha image at once
         let mut output = vec![0u8; block_count * 8];
         texpresso::Format::Bc4.compress(
-            &alpha_data,
+            &alpha_as_red,
             self.padded_width as usize,
             self.padded_height as usize,
             self.quality.to_texpresso_params(),
@@ -506,6 +526,7 @@ impl HapFrameEncoder {
             rgba_data,
             self.padded_width as usize,
             self.padded_height as usize,
+            self.quality.refine_iters(),
             &mut output,
         );
         Ok(output)

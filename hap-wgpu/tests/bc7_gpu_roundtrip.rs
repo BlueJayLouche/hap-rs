@@ -271,7 +271,7 @@ fn bc7_cpu_encoder_gpu_decode() {
     };
     let rgba = test_image();
     let mut bc7 = vec![0u8; (W * H) as usize];
-    hap_qt::bc7::compress_bc7_mode6(&rgba, W as usize, H as usize, &mut bc7);
+    hap_qt::bc7::compress_bc7_mode6(&rgba, W as usize, H as usize, hap_qt::DxtQuality::Balanced.refine_iters(), &mut bc7);
     let decoded = gpu_decode_bc7(&device, &queue, &bc7);
     assert_quality("cpu encoder -> gpu decode", &rgba, &decoded);
 }
@@ -293,7 +293,7 @@ fn bc7_gpu_shader_gpu_decode() {
     )
     .expect("compressor");
     let bc7 = compressor
-        .compress(&rgba, hap_qt::HapFormat::Hap7)
+        .compress(&rgba, hap_qt::HapFormat::Hap7, hap_qt::DxtQuality::Balanced)
         .expect("gpu compress");
     assert_eq!(bc7.len(), (W * H) as usize);
     let decoded = gpu_decode_bc7(&device, &queue, &bc7);

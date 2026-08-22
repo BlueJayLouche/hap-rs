@@ -49,7 +49,7 @@ use thiserror::Error;
 // Encoder modules
 pub mod encoder;
 pub mod gpu_compress;
-pub use encoder::{EncodeConfig, EncodeQuality, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError, pad_rgba};
+pub use encoder::{EncodeConfig, HapEncoderBuilder, HapVideoEncoder, VideoEncoderError, pad_rgba};
 pub use gpu_compress::{GpuDxtCompressor, GpuCompressError};
 
 /// WGSL helper for displaying Hap Q frames.
