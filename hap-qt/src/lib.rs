@@ -12,6 +12,7 @@ use thiserror::Error;
 pub use hap_parser::{HapFrame, TextureFormat};
 
 // Encoding modules
+pub mod bc7;
 pub mod frame_encoder;
 pub mod writer;
 

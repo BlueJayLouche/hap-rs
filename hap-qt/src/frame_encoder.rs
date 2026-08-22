@@ -496,21 +496,19 @@ impl HapFrameEncoder {
     }
 
     /// Compress RGBA data to BC7 format
-    #[cfg(feature = "cpu-compression")]
-    fn compress_bc7(&self, _rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
-        // BC7 compression is complex and not supported by texpresso
-        // Return an error for now - BC7 would need a specialized encoder
-        Err(HapEncodeError::UnsupportedFormat(
-            "BC7 compression not yet implemented".to_string()
-        ))
-    }
-
-    /// Compress RGBA data to BC7 format (fallback)
-    #[cfg(not(feature = "cpu-compression"))]
-    fn compress_bc7(&self, _rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
-        Err(HapEncodeError::UnsupportedFormat(
-            "BC7 compression requires 'cpu-compression' feature".to_string()
-        ))
+    ///
+    /// Uses the built-in mode-6 BC7 encoder (see [`crate::bc7`]). Pure Rust,
+    /// no external dependencies, so it is available regardless of the
+    /// `cpu-compression` feature.
+    fn compress_bc7(&self, rgba_data: &[u8]) -> Result<Vec<u8>, HapEncodeError> {
+        let mut output = vec![0u8; (self.blocks_x * self.blocks_y) as usize * 16];
+        crate::bc7::compress_bc7_mode6(
+            rgba_data,
+            self.padded_width as usize,
+            self.padded_height as usize,
+            &mut output,
+        );
+        Ok(output)
     }
 
     /// Build HAP frame header according to HAP spec

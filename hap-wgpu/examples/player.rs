@@ -43,6 +43,7 @@ fn main() -> anyhow::Result<()> {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
             force_fallback_adapter: false,
+            ..Default::default()
         }).await.expect("Failed to find suitable adapter")
     });
     

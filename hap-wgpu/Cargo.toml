@@ -12,7 +12,7 @@ categories = ["multimedia::video", "rendering::graphics-api"]
 [dependencies]
 hap-parser = { path = "../hap-parser", version = "0.2.0" }
 hap-qt = { path = "../hap-qt", version = "0.2.0" }
-wgpu = "29.0"
+wgpu = "30.0"
 parking_lot = "0.12"
 thiserror = "2.0"
 bytemuck = { version = "1.16", features = ["derive"] }

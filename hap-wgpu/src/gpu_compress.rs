@@ -43,6 +43,7 @@ pub struct GpuDxtCompressor {
     bc3_pipeline: wgpu::ComputePipeline,
     bc4_pipeline: wgpu::ComputePipeline,
     ycocg_bc3_pipeline: wgpu::ComputePipeline,
+    bc7_pipeline: wgpu::ComputePipeline,
 
     // Shared bind group layout
     bind_group_layout: wgpu::BindGroupLayout,
@@ -150,6 +151,8 @@ impl GpuDxtCompressor {
             "ycocg_bc3",
             include_str!("shaders/ycocg_bc3_compress.wgsl"),
         );
+        let bc7_pipeline =
+            Self::create_pipeline(&device, &pipeline_layout, "bc7", include_str!("shaders/bc7_compress.wgsl"));
 
         // Allocate buffers
         let input_size = (padded_w * padded_h * 4) as u64;
@@ -200,6 +203,7 @@ impl GpuDxtCompressor {
             bc3_pipeline,
             bc4_pipeline,
             ycocg_bc3_pipeline,
+            bc7_pipeline,
             bind_group_layout,
             input_buffer,
             output_buffer,
@@ -259,7 +263,7 @@ impl GpuDxtCompressor {
             HapFormat::Hap5 => (&self.bc3_pipeline, 16u32),
             HapFormat::HapY => (&self.ycocg_bc3_pipeline, 16u32),
             HapFormat::HapA => (&self.bc4_pipeline, 8u32),
-            _ => return Err(GpuCompressError::UnsupportedFormat(format)),
+            HapFormat::Hap7 => (&self.bc7_pipeline, 16u32),
         };
 
         let output_size = (self.blocks_x * self.blocks_y * bytes_per_block) as u64;
@@ -324,7 +328,9 @@ impl GpuDxtCompressor {
             .map_err(|e| GpuCompressError::BufferMapFailed(e.to_string()))?
             .map_err(|e| GpuCompressError::BufferMapFailed(format!("{:?}", e)))?;
 
-        let data = buffer_slice.get_mapped_range();
+        let data = buffer_slice
+            .get_mapped_range()
+            .map_err(|e| GpuCompressError::BufferMapFailed(format!("{:?}", e)))?;
         let result = data.to_vec();
         drop(data);
         self.readback_buffer.unmap();
@@ -334,12 +340,21 @@ impl GpuDxtCompressor {
 
     /// Get the supported formats for GPU compression
     pub fn supported_formats() -> &'static [HapFormat] {
-        &[HapFormat::Hap1, HapFormat::Hap5, HapFormat::HapY, HapFormat::HapA]
+        &[
+            HapFormat::Hap1,
+            HapFormat::Hap5,
+            HapFormat::HapY,
+            HapFormat::HapA,
+            HapFormat::Hap7,
+        ]
     }
 
     /// Check if a format is supported for GPU compression
     pub fn supports_format(format: HapFormat) -> bool {
-        matches!(format, HapFormat::Hap1 | HapFormat::Hap5 | HapFormat::HapY | HapFormat::HapA)
+        matches!(
+            format,
+            HapFormat::Hap1 | HapFormat::Hap5 | HapFormat::HapY | HapFormat::HapA | HapFormat::Hap7
+        )
     }
 
     /// Get the configured dimensions
@@ -362,6 +377,6 @@ mod tests {
     fn test_supported_formats() {
         assert!(GpuDxtCompressor::supports_format(HapFormat::Hap1));
         assert!(GpuDxtCompressor::supports_format(HapFormat::HapY));
-        assert!(!GpuDxtCompressor::supports_format(HapFormat::Hap7));
+        assert!(GpuDxtCompressor::supports_format(HapFormat::Hap7));
     }
 }
