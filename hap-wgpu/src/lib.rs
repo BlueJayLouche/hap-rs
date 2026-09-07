@@ -337,7 +337,15 @@ fn decode_ahead(
                         target.saturating_sub(step)
                     }
                 })
-                .find(|f| !state.decoded.iter().any(|(idx, _)| idx == f))
+                // Skip anything already decoded *or* already uploaded.
+                // `update()` takes a frame out of `decoded` to upload it, but
+                // the playhead has not moved on yet — without the cache check
+                // the very next poll decodes that same frame again, doubling
+                // the work for a frame that is already on the GPU.
+                .find(|f| {
+                    !state.decoded.iter().any(|(idx, _)| idx == f)
+                        && !state.frame_cache.iter().any(|(idx, _)| idx == f)
+                })
         };
 
         let Some(frame) = wanted else {
