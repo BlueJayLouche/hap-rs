@@ -260,10 +260,21 @@ struct PlayerState {
     loop_mode: LoopMode,
     /// Frame cache (keeps recent frames)
     frame_cache: VecDeque<(u32, Arc<HapTexture>)>,
+    /// Decoded but not yet uploaded, in frame order. The decoder thread fills
+    /// this; `update()` drains it. The upload deliberately stays on the
+    /// caller's thread — doing it here from a second thread costs more in
+    /// queue contention and staging memory than the decode it saves.
+    decoded: VecDeque<(u32, hap_qt::HapFrame)>,
     /// Maximum cache size
     max_cache_size: usize,
     /// Last frame time
     last_frame_time: Instant,
+    /// The last texture handed out, shown again if the decoder has not caught
+    /// up. Repeating a frame beats blocking the render thread for one.
+    last_texture: Option<Arc<HapTexture>>,
+    /// Which way the prefetcher should read. Follows playback, so reverse
+    /// playback fills backwards.
+    forward: bool,
 }
 
 impl PlayerState {
@@ -274,16 +285,98 @@ impl PlayerState {
             state: PlaybackState::Stopped,
             loop_mode: LoopMode::None,
             frame_cache: VecDeque::new(),
+            decoded: VecDeque::new(),
             max_cache_size: 8,
             last_frame_time: Instant::now(),
+            last_texture: None,
+            forward: true,
+        }
+    }
+}
+
+/// How many frames ahead of the playhead the decoder keeps ready. Two is
+/// enough to cover a decode that takes longer than a frame without holding a
+/// large clip's worth of GPU textures: a 4K HapY frame is ~8 MB.
+const PREFETCH: u32 = 3;
+
+/// Keep the cache filled ahead of the playhead until `running` clears.
+///
+/// Reads and uploads happen here, on this thread, so the caller's `update()`
+/// is a cache lookup. The loop is a poll rather than a request channel: the
+/// playhead the caller advances *is* the request, and a seek is just the
+/// playhead moving somewhere else.
+fn decode_ahead(
+    mut reader: QtHapReader,
+    state: Arc<Mutex<PlayerState>>,
+    running: Arc<std::sync::atomic::AtomicBool>,
+    frame_count: u32,
+) {
+    use std::sync::atomic::Ordering;
+    while running.load(Ordering::Relaxed) {
+        // What is wanted, and what is already decoded. The lock is held for
+        // the look, never for the read.
+        let wanted = {
+            let mut state = state.lock();
+            let target = state.current_frame as u32;
+            let forward = state.forward;
+            // Drop what the playhead has passed, or a clip longer than the
+            // queue would evict the frames just fetched.
+            state.decoded.retain(|(idx, _)| {
+                let ahead = if forward {
+                    idx.wrapping_sub(target)
+                } else {
+                    target.wrapping_sub(*idx)
+                };
+                ahead <= PREFETCH
+            });
+            (0..=PREFETCH)
+                .map(|step| {
+                    if forward {
+                        (target + step).min(frame_count.saturating_sub(1))
+                    } else {
+                        target.saturating_sub(step)
+                    }
+                })
+                // Skip anything already decoded *or* already uploaded.
+                // `update()` takes a frame out of `decoded` to upload it, but
+                // the playhead has not moved on yet — without the cache check
+                // the very next poll decodes that same frame again, doubling
+                // the work for a frame that is already on the GPU.
+                .find(|f| {
+                    !state.decoded.iter().any(|(idx, _)| idx == f)
+                        && !state.frame_cache.iter().any(|(idx, _)| idx == f)
+                })
+        };
+
+        let Some(frame) = wanted else {
+            // Full: nothing to do until the playhead moves.
+            thread::sleep(std::time::Duration::from_millis(2));
+            continue;
+        };
+
+        match reader.read_frame(frame) {
+            Ok(hap_frame) => {
+                let mut state = state.lock();
+                if !state.decoded.iter().any(|(idx, _)| *idx == frame) {
+                    state.decoded.push_back((frame, hap_frame));
+                    while state.decoded.len() > PREFETCH as usize + 1 {
+                        state.decoded.pop_front();
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to decode frame {}: {}", frame, e);
+                // A bad frame must not spin this loop at full tilt.
+                thread::sleep(std::time::Duration::from_millis(20));
+            }
         }
     }
 }
 
 /// HAP Video Player with background loading
 pub struct HapPlayer {
-    /// Video reader
-    reader: QtHapReader,
+    /// Texture format, read from the reader before it moved to the decoder.
+    texture_format: TextureFormat,
     /// wgpu device
     device: Arc<wgpu::Device>,
     /// wgpu queue
@@ -302,8 +395,11 @@ pub struct HapPlayer {
     codec_type: String,
     /// Shared state
     state: Arc<Mutex<PlayerState>>,
-    /// Decoder thread handle
-    _decoder_thread: Option<thread::JoinHandle<()>>,
+    /// Cleared on drop to stop the decoder thread.
+    running: Arc<std::sync::atomic::AtomicBool>,
+    /// Decoder thread handle — reads and uploads ahead of the playhead so
+    /// `update()` never decodes on the caller's thread.
+    decoder_thread: Option<thread::JoinHandle<()>>,
 }
 
 impl HapPlayer {
@@ -367,9 +463,20 @@ impl HapPlayer {
         );
         
         let state = Arc::new(Mutex::new(PlayerState::new()));
-        
+        let texture_format = reader.texture_format();
+        let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+
+        // The reader moves to the decoder thread: every read and upload happens
+        // there, ahead of the playhead, so `update()` is a cache lookup. Doing
+        // it inline was ~80% of the host's render-thread work on a 4K clip.
+        let decoder_thread = Some(thread::spawn({
+            let state = Arc::clone(&state);
+            let running = Arc::clone(&running);
+            move || decode_ahead(reader, state, running, frame_count)
+        }));
+
         Ok(Self {
-            reader,
+            texture_format,
             device,
             queue,
             dimensions,
@@ -379,7 +486,8 @@ impl HapPlayer {
             duration,
             codec_type,
             state,
-            _decoder_thread: None,
+            running,
+            decoder_thread,
         })
     }
     
@@ -470,55 +578,48 @@ impl HapPlayer {
         }
         
         let target_frame = state.current_frame as u32;
-        
-        // Check cache first
-        for (frame_idx, texture) in &state.frame_cache {
-            if *frame_idx == target_frame {
-                return Some(texture.clone());
-            }
+        state.forward = state.speed >= 0.0;
+
+        // A cache lookup, and nothing else: the decoder thread is what fills
+        // it. A miss shows the previous frame rather than stalling the caller
+        // for a read and a decompress — on a 4K clip that is milliseconds, and
+        // the caller is usually a render loop with a frame to finish.
+        let hit = state
+            .frame_cache
+            .iter()
+            .find(|(idx, _)| *idx == target_frame)
+            .map(|(_, texture)| Arc::clone(texture));
+        if let Some(texture) = hit {
+            state.last_texture = Some(Arc::clone(&texture));
+            return Some(texture);
         }
-        
-        // Not in cache, decode and upload
-        drop(state); // Release lock during decode
-        
-        match self.decode_and_upload(target_frame) {
-            Some(texture) => {
-                let mut state = self.state.lock();
-                
-                // Add to cache
-                state.frame_cache.push_back((target_frame, texture.clone()));
-                
-                // Trim cache if needed
-                while state.frame_cache.len() > state.max_cache_size {
-                    state.frame_cache.pop_front();
-                }
-                
-                Some(texture)
-            }
-            None => None,
+
+        // Not uploaded yet: take the decoded bytes the thread left and upload
+        // them here, on the caller's thread, where the queue already is.
+        let Some(pos) = state.decoded.iter().position(|(idx, _)| *idx == target_frame) else {
+            // The decoder has not caught up. Showing the previous frame beats
+            // blocking a render loop for a read and a decompress.
+            return state.last_texture.clone();
+        };
+        let (frame, hap_frame) = state.decoded.remove(pos).expect("position just found");
+        drop(state);
+
+        let texture = Arc::new(HapTexture::from_dxt_data(
+            &self.device,
+            &self.queue,
+            self.padded_dimensions.0,
+            self.padded_dimensions.1,
+            hap_frame.format,
+            &hap_frame.data,
+            frame,
+        ));
+        let mut state = self.state.lock();
+        state.frame_cache.push_back((frame, Arc::clone(&texture)));
+        while state.frame_cache.len() > state.max_cache_size {
+            state.frame_cache.pop_front();
         }
-    }
-    
-    /// Decode a frame and upload to GPU
-    fn decode_and_upload(&mut self, frame: u32) -> Option<Arc<HapTexture>> {
-        match self.reader.read_frame(frame) {
-            Ok(hap_frame) => {
-                let texture = HapTexture::from_dxt_data(
-                    &self.device,
-                    &self.queue,
-                    self.padded_dimensions.0,
-                    self.padded_dimensions.1,
-                    hap_frame.format,
-                    &hap_frame.data,
-                    frame,
-                );
-                Some(Arc::new(texture))
-            }
-            Err(e) => {
-                eprintln!("Failed to decode frame {}: {}", frame, e);
-                None
-            }
-        }
+        state.last_texture = Some(Arc::clone(&texture));
+        Some(texture)
     }
     
     /// Get video dimensions
@@ -553,7 +654,7 @@ impl HapPlayer {
     
     /// Get texture format
     pub fn texture_format(&self) -> TextureFormat {
-        self.reader.texture_format()
+        self.texture_format
     }
     
     /// Get current playback state
@@ -589,5 +690,16 @@ mod tests {
             hap_format_to_wgpu(TextureFormat::RgbaDxt5),
             wgpu::TextureFormat::Bc3RgbaUnorm
         );
+    }
+}
+
+impl Drop for HapPlayer {
+    fn drop(&mut self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.decoder_thread.take() {
+            // At most one poll interval plus a frame decode, so bounded.
+            let _ = thread.join();
+        }
     }
 }

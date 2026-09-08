@@ -38,8 +38,10 @@ pub enum QtError {
     HapError(#[from] hap_parser::HapError),
 }
 
-/// A QuickTime/HAP movie reader
-pub struct QtHapReader {
+/// A QuickTime movie reader. The sample-table walk is codec-agnostic; which
+/// tracks are accepted is decided by the fourcc prefixes passed to
+/// [`QtReader::open_codec`].
+pub struct QtReader {
     /// File handle
     file: File,
     /// Video track info
@@ -97,13 +99,22 @@ struct SampleToChunkEntry {
     sample_description_index: u32,
 }
 
-impl QtHapReader {
-    /// Open a QuickTime HAP file
+/// The HAP-gated reader this crate started as.
+pub type QtHapReader = QtReader;
+
+impl QtReader {
+    /// Open a QuickTime HAP file.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self, QtError> {
+        Self::open_codec(path, &["Hap"])
+    }
+
+    /// Open a QuickTime file, accepting any track whose sample-entry fourcc
+    /// starts with one of `accepts` (e.g. `&["nclc"]` for NotchLC).
+    pub fn open_codec<P: AsRef<Path>>(path: P, accepts: &[&str]) -> Result<Self, QtError> {
         let mut file = File::open(path)?;
         
         // Parse the file structure
-        let track = Self::parse_movie(&mut file)?;
+        let track = Self::parse_movie(&mut file, accepts)?;
         
         // Calculate duration and fps
         let duration = track.duration as f64 / track.timescale as f64;
@@ -158,8 +169,9 @@ impl QtHapReader {
         }
     }
     
-    /// Read a specific frame
-    pub fn read_frame(&mut self, frame_index: u32) -> Result<HapFrame, QtError> {
+    /// Byte offset and size of one sample in the file. Lets a caller read the
+    /// frame itself — from a mmap, say — instead of going through the reader.
+    pub fn sample_range(&self, frame_index: u32) -> Result<(u64, u32), QtError> {
         if frame_index >= self.track.frame_count {
             return Err(QtError::InvalidFile(format!(
                 "Frame index {} out of range (0-{})",
@@ -188,9 +200,16 @@ impl QtHapReader {
         let frame_size = self.track.sample_sizes.get(frame_index as usize)
             .ok_or_else(|| QtError::InvalidFile("Invalid sample size table".to_string()))?;
         
+        Ok((frame_offset, *frame_size))
+    }
+    
+    /// Read a specific frame
+    pub fn read_frame(&mut self, frame_index: u32) -> Result<HapFrame, QtError> {
+        let (frame_offset, frame_size) = self.sample_range(frame_index)?;
+        
         // Read frame data
         self.file.seek(SeekFrom::Start(frame_offset))?;
-        let mut frame_data = vec![0u8; *frame_size as usize];
+        let mut frame_data = vec![0u8; frame_size as usize];
         self.file.read_exact(&mut frame_data)?;
         
         // Parse HAP frame
@@ -227,7 +246,7 @@ impl QtHapReader {
     }
     
     /// Parse the movie structure
-    fn parse_movie(file: &mut File) -> Result<VideoTrack, QtError> {
+    fn parse_movie(file: &mut File, accepts: &[&str]) -> Result<VideoTrack, QtError> {
         let file_size = file.metadata()?.len();
         
         // Parse top-level atoms
@@ -273,11 +292,11 @@ impl QtHapReader {
         let mdat_offset = mdat_offset.ok_or_else(|| QtError::InvalidFile("No mdat atom found".to_string()))?;
         
         // Parse moov to find video track
-        Self::parse_moov(&moov_data, mdat_offset)
+        Self::parse_moov(&moov_data, mdat_offset, accepts)
     }
     
     /// Parse moov atom
-    fn parse_moov(data: &[u8], mdat_offset: u64) -> Result<VideoTrack, QtError> {
+    fn parse_moov(data: &[u8], mdat_offset: u64, accepts: &[&str]) -> Result<VideoTrack, QtError> {
         let mut cursor = io::Cursor::new(data);
         
         while cursor.position() < data.len() as u64 {
@@ -301,7 +320,7 @@ impl QtHapReader {
             
             if atom_type == "trak" {
                 // Try to parse this track
-                if let Ok(Some(track)) = Self::parse_trak(atom_data, mdat_offset) {
+                if let Ok(Some(track)) = Self::parse_trak(atom_data, mdat_offset, accepts) {
                     return Ok(track);
                 }
             }
@@ -313,7 +332,7 @@ impl QtHapReader {
     }
     
     /// Parse trak atom
-    fn parse_trak(data: &[u8], mdat_offset: u64) -> Result<Option<VideoTrack>, QtError> {
+    fn parse_trak(data: &[u8], mdat_offset: u64, accepts: &[&str]) -> Result<Option<VideoTrack>, QtError> {
         let mut track_id = None;
         let mut width = 0u32;
         let mut height = 0u32;
@@ -371,14 +390,13 @@ impl QtHapReader {
             cursor.set_position(pos + size as u64);
         }
         
-        // Check if this is a HAP track
         let sample_entry = match sample_entry {
             Some(se) => se,
             None => return Ok(None),
         };
         
-        if !sample_entry.codec_type.starts_with("Hap") {
-            return Ok(None); // Not a HAP track
+        if !accepts.iter().any(|a| sample_entry.codec_type.starts_with(a)) {
+            return Ok(None); // not a track this reader was asked for
         }
         
         let frame_count = sample_sizes.len() as u32;
