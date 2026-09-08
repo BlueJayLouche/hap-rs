@@ -299,6 +299,22 @@ impl PlayerState {
 /// large clip's worth of GPU textures: a 4K HapY frame is ~8 MB.
 const PREFETCH: u32 = 3;
 
+/// Frames the decode thread has actually decompressed, for
+/// [`HapPlayer::decode_count`]. Every decode is a Snappy pass over a whole
+/// frame, so this is the number that decides CPU cost — and the one to watch
+/// when changing how far ahead the thread reads.
+#[derive(Default)]
+pub(crate) struct DecodeCounter(std::sync::atomic::AtomicU64);
+
+impl DecodeCounter {
+    fn bump(&self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn get(&self) -> u64 {
+        self.0.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Keep the cache filled ahead of the playhead until `running` clears.
 ///
 /// Reads and uploads happen here, on this thread, so the caller's `update()`
@@ -310,6 +326,7 @@ fn decode_ahead(
     state: Arc<Mutex<PlayerState>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     frame_count: u32,
+    decodes: Arc<DecodeCounter>,
 ) {
     use std::sync::atomic::Ordering;
     while running.load(Ordering::Relaxed) {
@@ -354,6 +371,7 @@ fn decode_ahead(
             continue;
         };
 
+        decodes.bump();
         match reader.read_frame(frame) {
             Ok(hap_frame) => {
                 let mut state = state.lock();
@@ -400,6 +418,8 @@ pub struct HapPlayer {
     /// Decoder thread handle — reads and uploads ahead of the playhead so
     /// `update()` never decodes on the caller's thread.
     decoder_thread: Option<thread::JoinHandle<()>>,
+    /// How many frames the decoder has decompressed. See [`Self::decode_count`].
+    decode_counter: Arc<DecodeCounter>,
 }
 
 impl HapPlayer {
@@ -465,6 +485,7 @@ impl HapPlayer {
         let state = Arc::new(Mutex::new(PlayerState::new()));
         let texture_format = reader.texture_format();
         let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let decode_counter = Arc::new(DecodeCounter::default());
 
         // The reader moves to the decoder thread: every read and upload happens
         // there, ahead of the playhead, so `update()` is a cache lookup. Doing
@@ -472,10 +493,12 @@ impl HapPlayer {
         let decoder_thread = Some(thread::spawn({
             let state = Arc::clone(&state);
             let running = Arc::clone(&running);
-            move || decode_ahead(reader, state, running, frame_count)
+            let decodes = Arc::clone(&decode_counter);
+            move || decode_ahead(reader, state, running, frame_count, decodes)
         }));
 
         Ok(Self {
+            decode_counter,
             texture_format,
             device,
             queue,
@@ -524,6 +547,15 @@ impl HapPlayer {
         state.loop_mode = mode;
     }
     
+    /// Frames decompressed since the player opened.
+    ///
+    /// One Snappy pass over a whole frame each, so this is what decides CPU
+    /// cost. In steady state it should track the clip's frame rate; materially
+    /// above that means the read-ahead is fetching frames nobody displays.
+    pub fn decode_count(&self) -> u64 {
+        self.decode_counter.get()
+    }
+
     /// Seek to specific frame
     pub fn seek_to_frame(&mut self, frame: u32) {
         let mut state = self.state.lock();
