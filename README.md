@@ -50,7 +50,7 @@ cargo build --workspace
 # Run examples
 cargo run --package hap-qt --example encode_video -- output.mov 256 256 60
 cargo run --package hap-wgpu --example encode_hap -- output.mov 512 512 120
-cargo run --package hap-qt --example player -- video.mov
+cargo run --release --package hap-wgpu --example playback_rate -- video.mov  # headless: rate, decodes, CPU
 ```
 
 ## Usage

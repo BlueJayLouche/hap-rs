@@ -38,7 +38,7 @@
 // Re-export TextureFormat and HAP format types for convenience
 pub use hap_parser::TextureFormat;
 pub use hap_qt::{CompressionMode, DxtQuality, HapFormat, HapFrameEncoder, QtHapReader, VideoConfig};
-use parking_lot::Mutex;
+use parking_lot::{Condvar, Mutex};
 use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -275,6 +275,18 @@ struct PlayerState {
     /// Which way the prefetcher should read. Follows playback, so reverse
     /// playback fills backwards.
     forward: bool,
+    /// The frame `update()` has taken out of `decoded` and is uploading with
+    /// the lock released. It is in neither queue meanwhile; without this the
+    /// decoder decodes it again — a third more decodes on a 4K clip, where the
+    /// upload is an 8 MB copy and the window is wide.
+    uploading: Option<u32>,
+    /// The playhead frame the decoder was last woken for; `update()` wakes it
+    /// again only when the playhead reaches a new frame.
+    woken_for: Option<u32>,
+    /// How far the playhead moves per `update()`, smoothed. Read-ahead steps
+    /// by this, so a caller slower than the clip (a 30 Hz loop on a 50 fps
+    /// clip, a loaded render thread) only decodes the frames it will show.
+    stride: f32,
 }
 
 impl PlayerState {
@@ -290,6 +302,9 @@ impl PlayerState {
             last_frame_time: Instant::now(),
             last_texture: None,
             forward: true,
+            uploading: None,
+            woken_for: None,
+            stride: 1.0,
         }
     }
 }
@@ -315,15 +330,38 @@ impl DecodeCounter {
     }
 }
 
+/// The frames the caller will ask for on its next `PREFETCH + 1` calls: where
+/// the playhead *will be*, not simply the next frames. At a stride of 1.67 (a
+/// 30 Hz caller on a 50 fps clip) that is 0, 1, 3, 5, not 0, 1, 2, 3 — the
+/// frames between are never shown, so decoding them is waste. Looping playback
+/// wraps; otherwise the ends clamp.
+fn predicted_frames(
+    pos: f32,
+    stride: f32,
+    forward: bool,
+    wraps: bool,
+    frame_count: u32,
+) -> impl Iterator<Item = u32> {
+    let n = i64::from(frame_count.max(1));
+    let sign = if forward { 1.0 } else { -1.0 };
+    (0..=PREFETCH).map(move |step| {
+        let f = (pos + sign * step as f32 * stride.max(1.0)).floor() as i64;
+        (if wraps { f.rem_euclid(n) } else { f.clamp(0, n - 1) }) as u32
+    })
+}
+
 /// Keep the cache filled ahead of the playhead until `running` clears.
 ///
-/// Reads and uploads happen here, on this thread, so the caller's `update()`
-/// is a cache lookup. The loop is a poll rather than a request channel: the
-/// playhead the caller advances *is* the request, and a seek is just the
-/// playhead moving somewhere else.
+/// Reads happen here, on this thread, so the caller's `update()` is a lookup
+/// plus an upload. The playhead the caller advances *is* the request: when
+/// nothing is wanted the thread sleeps on `wake`, which `update()` signals when
+/// the playhead reaches a new frame and every control signals when it changes
+/// what is wanted. (It used to poll every 2 ms; that alone cost 1.5-4 points
+/// of CPU over decoding inline.)
 fn decode_ahead(
     mut reader: QtHapReader,
     state: Arc<Mutex<PlayerState>>,
+    wake: Arc<Condvar>,
     running: Arc<std::sync::atomic::AtomicBool>,
     frame_count: u32,
     decodes: Arc<DecodeCounter>,
@@ -334,40 +372,43 @@ fn decode_ahead(
         // the look, never for the read.
         let wanted = {
             let mut state = state.lock();
-            let target = state.current_frame as u32;
-            let forward = state.forward;
+            let pos = state.current_frame;
+            let target = pos as u32;
+            let sign = if state.forward { 1.0 } else { -1.0 };
+            let stride = state.stride.max(1.0);
+            // Looping playback wraps, so read ahead across the loop point too;
+            // otherwise every loop starts on a miss.
+            let wraps = state.loop_mode == LoopMode::Loop;
+            let n = i64::from(frame_count.max(1));
             // Drop what the playhead has passed, or a clip longer than the
             // queue would evict the frames just fetched.
+            let span = (PREFETCH as f32 * stride).ceil() as i64;
             state.decoded.retain(|(idx, _)| {
-                let ahead = if forward {
-                    idx.wrapping_sub(target)
-                } else {
-                    target.wrapping_sub(*idx)
-                };
-                ahead <= PREFETCH
+                let d = (i64::from(*idx) - i64::from(target)) * sign as i64;
+                let ahead = if wraps { d.rem_euclid(n) } else { d };
+                (0..=span).contains(&ahead)
             });
-            (0..=PREFETCH)
-                .map(|step| {
-                    if forward {
-                        (target + step).min(frame_count.saturating_sub(1))
-                    } else {
-                        target.saturating_sub(step)
-                    }
-                })
+            let found = predicted_frames(pos, stride, sign > 0.0, wraps, frame_count)
                 // Skip anything already decoded *or* already uploaded.
                 // `update()` takes a frame out of `decoded` to upload it, but
                 // the playhead has not moved on yet — without the cache check
                 // the very next poll decodes that same frame again, doubling
                 // the work for a frame that is already on the GPU.
                 .find(|f| {
-                    !state.decoded.iter().any(|(idx, _)| idx == f)
+                    state.uploading != Some(*f)
+                        && !state.decoded.iter().any(|(idx, _)| idx == f)
                         && !state.frame_cache.iter().any(|(idx, _)| idx == f)
-                })
+                });
+            if found.is_none() {
+                // Full: sleep until the playhead moves or a control changes what
+                // is wanted. Checked and waited under one lock, so no wakeup is
+                // lost; the timeout only bounds how long shutdown waits.
+                wake.wait_for(&mut state, std::time::Duration::from_millis(100));
+            }
+            found
         };
 
         let Some(frame) = wanted else {
-            // Full: nothing to do until the playhead moves.
-            thread::sleep(std::time::Duration::from_millis(2));
             continue;
         };
 
@@ -413,6 +454,8 @@ pub struct HapPlayer {
     codec_type: String,
     /// Shared state
     state: Arc<Mutex<PlayerState>>,
+    /// Wakes the decoder thread when what it should read changes.
+    wake: Arc<Condvar>,
     /// Cleared on drop to stop the decoder thread.
     running: Arc<std::sync::atomic::AtomicBool>,
     /// Decoder thread handle — reads and uploads ahead of the playhead so
@@ -490,11 +533,13 @@ impl HapPlayer {
         // The reader moves to the decoder thread: every read and upload happens
         // there, ahead of the playhead, so `update()` is a cache lookup. Doing
         // it inline was ~80% of the host's render-thread work on a 4K clip.
+        let wake = Arc::new(Condvar::new());
         let decoder_thread = Some(thread::spawn({
             let state = Arc::clone(&state);
+            let wake = Arc::clone(&wake);
             let running = Arc::clone(&running);
             let decodes = Arc::clone(&decode_counter);
-            move || decode_ahead(reader, state, running, frame_count, decodes)
+            move || decode_ahead(reader, state, wake, running, frame_count, decodes)
         }));
 
         Ok(Self {
@@ -509,6 +554,7 @@ impl HapPlayer {
             duration,
             codec_type,
             state,
+            wake,
             running,
             decoder_thread,
         })
@@ -519,12 +565,16 @@ impl HapPlayer {
         let mut state = self.state.lock();
         state.state = PlaybackState::Playing;
         state.last_frame_time = Instant::now();
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Pause playback
     pub fn pause(&mut self) {
         let mut state = self.state.lock();
         state.state = PlaybackState::Paused;
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Stop playback
@@ -533,18 +583,24 @@ impl HapPlayer {
         state.state = PlaybackState::Stopped;
         state.current_frame = 0.0;
         state.frame_cache.clear();
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Set playback speed
     pub fn set_speed(&mut self, speed: f32) {
         let mut state = self.state.lock();
         state.speed = speed;
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Set loop mode
     pub fn set_loop_mode(&mut self, mode: LoopMode) {
         let mut state = self.state.lock();
         state.loop_mode = mode;
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Frames decompressed since the player opened.
@@ -561,6 +617,8 @@ impl HapPlayer {
         let mut state = self.state.lock();
         state.current_frame = frame.min(self.frame_count - 1) as f32;
         state.frame_cache.clear();
+        drop(state);
+        self.wake.notify_one();
     }
     
     /// Get current frame texture (call every render frame)
@@ -576,6 +634,7 @@ impl HapPlayer {
             // Advance frame
             let frame_delta = state.speed * self.fps * dt.as_secs_f32();
             state.current_frame += frame_delta;
+            state.stride = 0.8 * state.stride + 0.2 * frame_delta.abs();
             
             // Handle loop/end
             if state.current_frame >= self.frame_count as f32 {
@@ -611,6 +670,10 @@ impl HapPlayer {
         
         let target_frame = state.current_frame as u32;
         state.forward = state.speed >= 0.0;
+        if state.woken_for != Some(target_frame) {
+            state.woken_for = Some(target_frame);
+            self.wake.notify_one();
+        }
 
         // A cache lookup, and nothing else: the decoder thread is what fills
         // it. A miss shows the previous frame rather than stalling the caller
@@ -634,6 +697,7 @@ impl HapPlayer {
             return state.last_texture.clone();
         };
         let (frame, hap_frame) = state.decoded.remove(pos).expect("position just found");
+        state.uploading = Some(frame);
         drop(state);
 
         let texture = Arc::new(HapTexture::from_dxt_data(
@@ -646,6 +710,7 @@ impl HapPlayer {
             frame,
         ));
         let mut state = self.state.lock();
+        state.uploading = None;
         state.frame_cache.push_back((frame, Arc::clone(&texture)));
         while state.frame_cache.len() > state.max_cache_size {
             state.frame_cache.pop_front();
@@ -700,9 +765,40 @@ impl HapPlayer {
     }
 }
 
+impl Drop for HapPlayer {
+    fn drop(&mut self) {
+        self.running
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        self.wake.notify_one();
+        if let Some(thread) = self.decoder_thread.take() {
+            // At most one poll interval plus a frame decode, so bounded.
+            let _ = thread.join();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_ahead_follows_the_playhead_stride() {
+        let frames = |pos, stride, fwd, wraps| {
+            predicted_frames(pos, stride, fwd, wraps, 10).collect::<Vec<_>>()
+        };
+        // A caller at the clip rate wants consecutive frames.
+        assert_eq!(frames(0.0, 1.0, true, false), [0, 1, 2, 3]);
+        // A caller slower than the clip skips the frames it will never show.
+        assert_eq!(frames(0.0, 5.0 / 3.0, true, false), [0, 1, 3, 5]);
+        // A caller faster than the clip still reads whole frames ahead.
+        assert_eq!(frames(4.2, 0.5, true, false), [4, 5, 6, 7]);
+        // Looping wraps past the end; one-shot clamps at it.
+        assert_eq!(frames(8.0, 1.0, true, true), [8, 9, 0, 1]);
+        assert_eq!(frames(8.0, 1.0, true, false), [8, 9, 9, 9]);
+        // Reverse reads backwards, wrapping or clamping at frame 0.
+        assert_eq!(frames(1.0, 1.0, false, true), [1, 0, 9, 8]);
+        assert_eq!(frames(1.0, 1.0, false, false), [1, 0, 0, 0]);
+    }
 
     #[test]
     fn test_padded_dimensions() {
@@ -722,16 +818,5 @@ mod tests {
             hap_format_to_wgpu(TextureFormat::RgbaDxt5),
             wgpu::TextureFormat::Bc3RgbaUnorm
         );
-    }
-}
-
-impl Drop for HapPlayer {
-    fn drop(&mut self) {
-        self.running
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(thread) = self.decoder_thread.take() {
-            // At most one poll interval plus a frame decode, so bounded.
-            let _ = thread.join();
-        }
     }
 }

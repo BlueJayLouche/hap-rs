@@ -1,6 +1,6 @@
 [package]
 name = "hap-wgpu"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 authors = ["BlueJayLouche <bluejaylouche@gmail.com>"]
 description = "wgpu integration for HAP video playback"
@@ -13,7 +13,7 @@ categories = ["multimedia::video", "rendering::graphics-api"]
 hap-parser = { path = "../hap-parser", version = "0.2.0" }
 hap-qt = { path = "../hap-qt", version = "0.3.0" }
 wgpu = "30.0"
-parking_lot = "0.12"
+parking_lot = "0.13"
 thiserror = "2.0"
 bytemuck = { version = "1.16", features = ["derive"] }
 
@@ -26,6 +26,5 @@ image-support = ["dep:image"]
 
 [dev-dependencies]
 anyhow = "1.0"
-pollster = "0.3"
+pollster = "1.0"
 env_logger = "0.11"
-winit = "0.30"
