@@ -10,7 +10,7 @@ fn main() -> anyhow::Result<()> {
     
     if args.len() < 2 {
         eprintln!("Usage: {} <hap_file>", args[0]);
-        eprintln!("");
+        eprintln!();
         eprintln!("Inspects the first HAP frame in a QuickTime container.");
         std::process::exit(1);
     }
