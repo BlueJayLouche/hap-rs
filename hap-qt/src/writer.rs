@@ -892,7 +892,7 @@ mod tests {
 
         let config = VideoConfig::new(64, 64, 30.0, HapFormat::Hap1);
         let mut writer = QtHapWriter::create(&output_path, config).unwrap();
-        writer.write_frame(&vec![0xABu8; 100]).unwrap();
+        writer.write_frame(&[0xABu8; 100]).unwrap();
         writer.finalize().unwrap();
 
         let mut file = File::open(&output_path).unwrap();

@@ -56,6 +56,7 @@ pub struct QtReader {
 #[derive(Debug, Clone)]
 struct VideoTrack {
     /// Track ID
+    #[allow(dead_code)] // parsed, unused: one video track is assumed
     track_id: u32,
     /// Video width
     width: u32,
@@ -76,6 +77,7 @@ struct VideoTrack {
     /// Sample to chunk mappings
     sample_to_chunk: Vec<SampleToChunkEntry>,
     /// Sample durations (delta)
+    #[allow(dead_code)] // parsed, unused until variable-frame-rate timing
     sample_deltas: Vec<u32>,
 }
 
@@ -85,6 +87,7 @@ struct SampleEntry {
     /// Codec type (e.g., "Hap1", "Hap5", "HapY")
     codec_type: String,
     /// Data reference index
+    #[allow(dead_code)] // parsed per the spec, nothing reads it
     data_reference_index: u16,
 }
 
@@ -96,6 +99,7 @@ struct SampleToChunkEntry {
     /// Samples per chunk
     samples_per_chunk: u32,
     /// Sample description ID
+    #[allow(dead_code)] // parsed per the spec, nothing reads it
     sample_description_index: u32,
 }
 

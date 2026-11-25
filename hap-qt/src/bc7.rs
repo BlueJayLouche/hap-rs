@@ -55,8 +55,8 @@ fn encode_block(px: &[[u8; 4]; 16], refine_iters: u32) -> [u8; 16] {
             mean[c] += p[c] as f32;
         }
     }
-    for c in 0..4 {
-        mean[c] /= 16.0;
+    for m in &mut mean {
+        *m /= 16.0;
     }
     let mut cov = [[0f32; 4]; 4];
     for p in px {
@@ -332,13 +332,13 @@ mod tests {
 
         let mut pos = 65;
         let mut out = [[0u8; 4]; 16];
-        for i in 0..16 {
+        for (i, texel) in out.iter_mut().enumerate() {
             let bits = if i == 0 { 3 } else { 4 };
             let idx = ((b >> pos) & ((1 << bits) - 1)) as usize;
             pos += bits;
             let w = WEIGHTS4[idx] as f32;
             for c in 0..4 {
-                out[i][c] = (((64.0 - w) * e0[c] + w * e1[c] + 32.0) / 64.0) as u8;
+                texel[c] = (((64.0 - w) * e0[c] + w * e1[c] + 32.0) / 64.0) as u8;
             }
         }
         out

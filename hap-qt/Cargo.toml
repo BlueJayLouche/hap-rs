@@ -13,7 +13,6 @@ categories = ["multimedia::video", "parser-implementations"]
 hap-parser = { path = "../hap-parser", version = "0.2.0" }
 byteorder = "1.5"
 thiserror = "2.0"
-memmap2 = "0.9"
 
 # Snappy compression for HAP encoding
 snap = "1.1"
